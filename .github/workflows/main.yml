@@ -1,19 +1,25 @@
-name: Ubuntu AmneziaWG Server (Custom Config)
+name: Ubuntu RDP + AmneziaWG VPN Server
 
 on:
   workflow_dispatch:
     inputs:
       runtime_minutes:
-        description: "Runtime (max 360)"
+        description: "Runtime (max 360 menit)"
         default: "355"
       server_port:
-        description: "WG Port (contoh: 16978)"
-        default: "16978"
+        description: "WG Port"
+        default: "51820"
+      rdp_user:
+        description: "Username RDP"
+        default: "vpnuser"
+      rdp_pass:
+        description: "Password RDP"
+        default: "VpnUser123!"
 
 env:
-  RDP_USER: bullet
-  RDP_PASS: Bullet@12345
-  # Parameter AmneziaWG sama persis kayak config contoh
+  RDP_USER: ${{ inputs.rdp_user }}
+  RDP_PASS: ${{ inputs.rdp_pass }}
+  WG_PORT: ${{ inputs.server_port }}
   JC: 4
   JMIN: 40
   JMAX: 70
@@ -30,141 +36,152 @@ jobs:
     timeout-minutes: 370
     
     steps:
-      - name: Install AmneziaWG + RDP
+      - name: Install XFCE + XRDP + Tools
         run: |
-          sudo apt update && sudo DEBIAN_FRONTEND=noninteractive apt install -y \
-            wireguard-tools build-essential linux-headers-$(uname -r) \
-            xfce4 xfce4-goodies xrdp dbus-x11 xorg qrencode curl
-          
-          # Install AmneziaWG
-          cd /tmp
-          wget -q https://github.com/amnezia-vpn/amneziawg-go/releases/latest/download/amneziawg-go-linux-amd64 -O amneziawg-go
-          chmod +x amneziawg-go && sudo mv amneziawg-go /usr/local/bin/
-          
-          git clone https://github.com/amnezia-vpn/amneziawg-tools.git
-          cd amneziawg-tools/src && make && sudo make install
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-goodies xrdp dbus-x11 xorg \
+            qrencode curl wget git net-tools \
+            build-essential libssl-dev \
+            wireguard-tools 2>/dev/null || true
 
-      - name: Setup Server
+      - name: Install AmneziaWG
         run: |
-          # Enable IP forwarding
-          echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf
-          sudo sysctl -p
+          # Download binary
+          sudo wget -qO /usr/local/bin/amneziawg-go \
+            https://github.com/amnezia-vpn/amneziawg-go/releases/latest/download/amneziawg-go-linux-amd64
+          sudo chmod +x /usr/local/bin/amneziawg-go
           
-          cd /etc/wireguard
+          # Build tools
+          cd /tmp
+          rm -rf amneziawg-tools
+          git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git
+          cd amneziawg-tools/src
+          make clean 2>/dev/null || true
+          make -j$(nproc) 2>&1 && sudo make install || {
+            echo "Make failed, trying basic build..."
+            make clean && make && sudo make install
+          }
+
+      - name: Setup VPN Server
+        run: |
+          sudo mkdir -p /etc/amneziawg
+          cd /etc/amneziawg
           
-          # Generate keypair
-          SERVER_PRIV=$(sudo wg genkey | tee privatekey)
-          SERVER_PUB=$(echo "$SERVER_PRIV" | sudo wg pubkey | tee publickey)
+          # Generate keys
+          SERVER_PRIV=$(sudo wg genkey | tee server-private)
+          SERVER_PUB=$(echo "$SERVER_PRIV" | sudo wg pubkey | tee server-public)
+          CLIENT_PRIV=$(sudo wg genkey | tee client-private)
+          CLIENT_PUB=$(echo "$CLIENT_PRIV" | sudo wg pubkey | tee client-public)
+          PSK=$(sudo wg genpsk | tee preshared)
           
-          # Generate client keypair
-          CLIENT_PRIV=$(sudo wg genkey | tee client-privatekey)
-          CLIENT_PUB=$(echo "$CLIENT_PRIV" | sudo wg pubkey | tee client-publickey)
+          SERVER_IP=$(curl -s -4 ifconfig.me)
           
-          # Generate PresharedKey (untuk extra security)
-          PSK=$(sudo wg genpsk | tee presharedkey)
-          
-          SERVER_IP=$(curl -s ifconfig.me)
-          WG_PORT=${{ inputs.server_port }}
-          
-          # Server config (wg0.conf)
-          sudo tee wg0.conf << EOF
-          [Interface]
-          PrivateKey = $SERVER_PRIV
-          Address = 10.66.66.1/24
-          ListenPort = $WG_PORT
-          DNS = 1.1.1.1, 8.8.8.8
-          Jc = $JC
-          Jmin = $JMIN
-          Jmax = $JMAX
-          S1 = $S1
-          S2 = $S2
-          H1 = $H1
-          H2 = $H2
-          H3 = $H3
-          H4 = $H4
-          
-          [Peer]
-          # Client
-          PublicKey = $CLIENT_PUB
-          PresharedKey = $PSK
-          AllowedIPs = 10.66.66.61/32
-          EOF
-          
-          # Client config (format sama persis kayak contoh)
-          CLIENT_CONFIG="[Interface]
-          PrivateKey = $CLIENT_PRIV
-          Address = 10.66.66.61/24
-          DNS = 1.1.1.1,8.8.8.8
-          
-          Jc = $JC
-          Jmin = $JMIN
-          Jmax = $JMAX
-          S1 = $S1
-          S2 = $S2
-          H1 = $H1
-          H2 = $H2
-          H3 = $H3
-          H4 = $H4
-          
-          [Peer]
-          PublicKey = $SERVER_PUB
-          PresharedKey = $PSK
-          Endpoint = $SERVER_IP:$WG_PORT
-          AllowedIPs = 0.0.0.0/0, ::/0
-          PersistentKeepalive = 25"
-          
-          # Save configs
-          echo "$CLIENT_CONFIG" | sudo tee /tmp/client.conf
-          
+          # Server config
+          sudo tee awg0.conf << EOF
+[Interface]
+PrivateKey = $SERVER_PRIV
+Address = 10.66.66.1/24
+ListenPort = ${WG_PORT}
+DNS = 1.1.1.1, 8.8.8.8
+Jc = ${JC}
+Jmin = ${JMIN}
+Jmax = ${JMAX}
+S1 = ${S1}
+S2 = ${S2}
+H1 = ${H1}
+H2 = ${H2}
+H3 = ${H3}
+H4 = ${H4}
+
+[Peer]
+PublicKey = $CLIENT_PUB
+PresharedKey = $PSK
+AllowedIPs = 10.66.66.2/32
+EOF
+
+          # Client config
+          sudo tee /tmp/client.conf << EOF
+[Interface]
+PrivateKey = ${CLIENT_PRIV}
+Address = 10.66.66.2/24
+DNS = 1.1.1.1, 8.8.8.8
+Jc = ${JC}
+Jmin = ${JMIN}
+Jmax = ${JMAX}
+S1 = ${S1}
+S2 = ${S2}
+H1 = ${H1}
+H2 = ${H2}
+H3 = ${H3}
+H4 = ${H4}
+
+[Peer]
+PublicKey = ${SERVER_PUB}
+PresharedKey = ${PSK}
+Endpoint = ${SERVER_IP}:${WG_PORT}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+
           # Start VPN
-          sudo wg-quick up wg0
+          sudo chmod 600 awg0.conf
+          sudo cp awg0.conf /etc/wireguard/wg0.conf 2>/dev/null || true
           
-          # Setup NAT
-          sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-          sudo iptables -A FORWARD -i wg0 -j ACCEPT
-          sudo iptables -A FORWARD -o wg0 -j ACCEPT
+          # Try start
+          sudo wg-quick up wg0 2>/dev/null || sudo awg-quick up awg0 2>/dev/null || {
+            sudo ip link add dev wg0 type wireguard 2>/dev/null || true
+            sudo ip addr add 10.66.66.1/24 dev wg0 2>/dev/null || true
+            sudo wg setconf wg0 /etc/amneziawg/awg0.conf 2>/dev/null || true
+            sudo ip link set up dev wg0 2>/dev/null || true
+          }
           
-          # Allow port
-          sudo ufw allow $WG_PORT/udp 2>/dev/null || true
+          # NAT
+          IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+          sudo iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE 2>/dev/null || true
+          sudo iptables -A FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
+          sudo iptables -A FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
+          sudo ufw allow ${WG_PORT}/udp 2>/dev/null || true
 
       - name: Setup RDP
         run: |
-          # Create user
-          sudo useradd -m -s /bin/bash $RDP_USER 2>/dev/null || true
+          id $RDP_USER &>/dev/null || sudo useradd -m -s /bin/bash $RDP_USER
           echo "$RDP_USER:$RDP_PASS" | sudo chpasswd
-          sudo usermod -aG sudo $RDP_USER
+          sudo usermod -aG sudo $RDP_USER 2>/dev/null || true
           
-          # Config XRDP
           echo "xfce4-session" | sudo tee /home/$RDP_USER/.xsession
-          sudo chown $RDP_USER:$RDP_USER /home/$RDP_USER/.xsession
-          sudo sed -i 's|test -x /etc/X11/Xsession && exec /etc/X11/Xsession|exec startxfce4|' /etc/xrdp/startwm.sh
+          sudo chown $RDP_USER:$RDP_USER /home/$RDP_USER/.xsession 2>/dev/null || true
           
-          # Start RDP
-          sudo systemctl restart xrdp
-          sudo systemctl restart xrdp-sesman
+          sudo sed -i 's|test -x /etc/X11/Xsession && exec /etc/X11/Xsession|exec startxfce4|' /etc/xrdp/startwm.sh 2>/dev/null || true
+          
+          sudo systemctl restart xrdp 2>/dev/null || sudo service xrdp restart
+          sudo systemctl restart xrdp-sesman 2>/dev/null || sudo service xrdp-sesman restart
 
-      - name: Output Config
+      - name: Show Configs
         run: |
-          echo "========================================"
-          echo "COPY INI KE FILE .conf DI ANDROID/PC:"
-          echo "========================================"
-          cat /tmp/client.conf
+          SERVER_IP=$(curl -s -4 ifconfig.me)
+          
           echo ""
-          echo "========================================"
-          echo "QR CODE (SCAN PAKE AMNEZIAWG):"
-          echo "========================================"
-          cat /tmp/client.conf | qrencode -t ANSIUTF8
+          echo "=========================================="
+          echo "   🔐 AMNEZIAWG CLIENT CONFIG (.conf)"
+          echo "=========================================="
+          sudo cat /tmp/client.conf
           echo ""
-          echo "========================================"
-          echo "RDP ACCESS (setelah VPN connect):"
-          echo "========================================"
+          echo "=========================================="
+          echo "   📱 QR CODE (SCAN PAKAI AMNEZIAWG)"
+          echo "=========================================="
+          sudo cat /tmp/client.conf | qrencode -t ANSIUTF8 2>/dev/null || true
+          echo ""
+          echo "=========================================="
+          echo "   🖥️  RDP ACCESS (Connect VPN Dulu!)"
+          echo "=========================================="
           echo "IP: 10.66.66.1"
           echo "User: $RDP_USER"
           echo "Pass: $RDP_PASS"
-          echo "========================================"
           echo ""
-          echo "Server Public IP: $(curl -s ifconfig.me)"
-          echo "Port: ${{ inputs.server_port }}"
+          echo "Public IP: $SERVER_IP"
+          echo "WG Port: $WG_PORT"
+          echo "=========================================="
 
       - name: Keep Alive
         run: sleep $(( ${{ inputs.runtime_minutes }} * 60 ))
