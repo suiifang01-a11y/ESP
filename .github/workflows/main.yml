@@ -26,44 +26,29 @@ defaults:
     shell: bash
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.mk.outputs.matrix }}
-    steps:
-      - id: mk
-        run: |
-          n=1
-          inc=()
-          for i in $(seq 1 $n); do
-            inc+=("{\"id\": $i}")
-          done
-          matrix=$(jq -n --argjson include "$(printf '%s\n' "${inc[@]}" | jq -s .)" '{include: $include}')
-          echo "matrix=$matrix" >> $GITHUB_OUTPUT
-
+  # Kita hilangkan job setup terpisah dan matrix rumit jika hanya butuh 1 instance.
+  # Jika kamu butuh multi-instance, kita bisa gunakan strategy langsung di job utama.
+  # Untuk stabilitas, kita gunakan single job tanpa matrix kompleks dulu.
+  
   rdp:
-    needs: setup
     runs-on: ubuntu-latest
-    strategy:
-      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
-      max-parallel: 1
     timeout-minutes: 370
     steps:
-      - name: Install Tailscale & Detect OS
+      - name: Install Tailscale
         run: |
-          # Gunakan script install resmi Tailscale yang handle repo otomatis
+          # Script resmi Tailscale menangani repo dengan benar untuk Ubuntu 22.04/24.04
           curl -fsSL https://tailscale.com/install.sh | sh -s -- --version stable
           
           # Logout sesi lama jika ada
           tailscale logout
           
-          # Set hostname unik untuk job ini
-          tailscale up --authkey "${{ inputs.ts_authkey }}" --hostname "ubuntu-${{ matrix.id }}" --accept-dns=true --accept-routes=true
+          # Connect ke Tailnet
+          tailscale up --authkey "${{ inputs.ts_authkey }}" --hostname "ubuntu-gh-${{ github.run_id }}" --accept-dns=true --accept-routes=true
           
-          # Ambil IP
+          # Ambil IPv4 untuk akses RDP nanti
           ip4=$(tailscale ip -4 | head -n 1)
           echo "TAILSCALE_IP=$ip4" >> $GITHUB_ENV
-          echo "Tailscale IPv4: $ip4"
+          echo "::notice::Tailscale IPv4: $ip4"
 
       - name: Install XFCE and GUI tools
         run: |
@@ -78,6 +63,62 @@ jobs:
             firefox-esr \
             ttf-mscorefonts-installer
 
+      - name: Configure XRDP for XFCE
+        run: |
+          # Set default session ke XFCE
+          echo "xfce4-session" | sudo tee /etc/xrdp/sesman/startwm.sh
+          
+          # Fix permission issue pada Ubuntu 22.04/24.04 untuk XRDP
+          sudo cp /etc/ssl/private/ssl-cert-snakeoil.key /etc/xrdp/
+          sudo chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key
+          sudo chgrp ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key
+          
+          # Restart XRDP
+          sudo systemctl daemon-reload
+          sudo systemctl enable xrdp
+          sudo systemctl start xrdp
+
+      - name: Start Virtual Display and XFCE
+        run: |
+          # Start Xvfb
+          Xvfb :99 \
+            -screen 0 1920x1080x24 \
+            -ac \
+            +extension GLX \
+            +render \
+            -noreset &
+          
+          # Tunggu Xvfb siap
+          sleep 3
+          
+          # Start XFCE session
+          export DISPLAY=:99
+          dbus-launch --exit-with-session startxfce4 &
+          
+          # Tunggu XFCE load penuh
+          sleep 10
+
+      - name: Verify Services
+        run: |
+          echo "Checking XRDP..."
+          sudo ss -tlnp | grep 3389 || echo "XRDP not listening on 3389"
+          
+          echo "Checking Xvfb..."
+          pgrep -a Xvfb || echo "Xvfb not running"
+          
+          echo "Checking XFCE..."
+          pgrep -a xfce4 || echo "XFCE not running"
+          
+          echo "Tailscale IP: $TAILSCALE_IP"
+
+      - name: Keep alive
+        run: |
+          mins=${{ inputs.runtime_minutes }}
+          end=$(date -d "+$mins minutes" +%s)
+          while [ $(date +%s) -lt $end ]; do
+            echo "Heartbeat $(date -u '+%H:%M:%S')"
+            sleep 60
+          done
       - name: Configure XRDP
         run: |
           # Pastikan XRDP menggunakan XFCE sebagai default session
