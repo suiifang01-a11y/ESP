@@ -3,10 +3,19 @@ name: RDP + Tailscale + Ubuntu XFCE
 on:
   workflow_dispatch:
     inputs:
-      ts_tailnet:         { description: "Tailscale tailnet (e.g. you@gmail.com)", required: true }
-      ts_api_key:         { description: "Tailscale API key (device admin, no Bearer)", required: true }
-      ts_authkey:         { description: "Tailscale Auth key (reusable or ephemeral)", required: true }
-      runtime_minutes:    { description: "Runtime (max 360; default 355 when not test)", required: false, default: "355" }
+      ts_tailnet:         
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+      ts_api_key:         
+        description: "Tailscale API key (device admin, no Bearer)"
+        required: true
+      ts_authkey:         
+        description: "Tailscale Auth key (reusable or ephemeral)"
+        required: true
+      runtime_minutes:    
+        description: "Runtime (max 360; default 355 when not test)"
+        required: false
+        default: "355"
 
 permissions:
   contents: read
@@ -40,16 +49,18 @@ jobs:
       max-parallel: 1
     timeout-minutes: 370
     steps:
-      - name: Install + Up Tailscale
+      - name: Install Tailscale & Detect OS
         run: |
-          if ! command -v tailscale &> /dev/null; then
-            curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
-            sudo apt-add-repository "deb https://pkgs.tailscale.com/stable/ubuntu focal main"
-            sudo apt-get update
-            sudo apt-get install -y tailscale
-          fi
+          # Gunakan script install resmi Tailscale yang handle repo otomatis
+          curl -fsSL https://tailscale.com/install.sh | sh -s -- --version stable
+          
+          # Logout sesi lama jika ada
           tailscale logout
+          
+          # Set hostname unik untuk job ini
           tailscale up --authkey "${{ inputs.ts_authkey }}" --hostname "ubuntu-${{ matrix.id }}" --accept-dns=true --accept-routes=true
+          
+          # Ambil IP
           ip4=$(tailscale ip -4 | head -n 1)
           echo "TAILSCALE_IP=$ip4" >> $GITHUB_ENV
           echo "Tailscale IPv4: $ip4"
@@ -63,34 +74,57 @@ jobs:
             xfce4-terminal \
             xvfb \
             dbus-x11 \
-            xrdp
+            xrdp \
+            firefox-esr \
+            ttf-mscorefonts-installer
 
-      - name: Start virtual display
+      - name: Configure XRDP
         run: |
+          # Pastikan XRDP menggunakan XFCE sebagai default session
+          echo "xfce4-session" | sudo tee /etc/xrdp/sesman/startwm.sh
+          
+          # Fix issue dengan XRDP pada Ubuntu 22.04/24.04 terkait certificate
+          sudo cp /etc/ssl/private/ssl-cert-snakeoil.key /etc/xrdp/
+          sudo chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key
+          sudo chgrp ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key
+          
+          # Restart XRDP
+          sudo systemctl daemon-reload
+          sudo systemctl enable xrdp
+          sudo systemctl start xrdp
+
+      - name: Start virtual display and XFCE
+        run: |
+          # Start Xvfb
           Xvfb :99 \
             -screen 0 1920x1080x24 \
             -ac \
             +extension GLX \
             +render \
             -noreset &
+          
+          # Wait for Xvfb to be ready
           sleep 3
-
-      - name: Start XFCE
-        env:
-          DISPLAY: :99
-        run: |
-          dbus-launch \
-            --exit-with-session \
-            startxfce4 &
+          
+          # Start XFCE session
+          export DISPLAY=:99
+          dbus-launch --exit-with-session startxfce4 &
+          
+          # Wait for XFCE to fully load
           sleep 10
 
-      - name: Enable RDP
+      - name: Verify RDP
         run: |
-          sudo systemctl enable xrdp
-          sudo systemctl start xrdp
-          sudo ufw allow 3389/tcp
+          echo "Checking if XRDP is listening..."
+          sudo netstat -tlnp | grep 3389 || sudo ss -tlnp | grep 3389
+          
+          echo "Checking if Xvfb is running..."
+          pgrep -a Xvfb
+          
+          echo "Checking if XFCE is running..."
+          pgrep -a xfce4
 
-      - name: Keep alive (to ${{ env.RUNTIME_MINUTES }} mins)
+      - name: Keep alive (to ${{ inputs.runtime_minutes }} mins)
         run: |
           mins=${{ inputs.runtime_minutes }}
           end=$(date -d "+$mins minutes" +%s)
