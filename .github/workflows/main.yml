@@ -24,10 +24,13 @@ jobs:
     steps:
       - id: mk
         run: |
-          $n = 1
-          $inc = @(); for ($i=1; $i -le $n; $i++){ $inc += @{ id = $i } }
-          $json = @{ include = $inc } | ConvertTo-Json -Compress
-          "matrix=$json" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          n=1
+          inc=()
+          for i in $(seq 1 $n); do
+            inc+=("{\"id\": $i}")
+          done
+          matrix=$(jq -n --argjson include "$(printf '%s\n' "${inc[@]}" | jq -s .)" '{include: $include}')
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
   rdp:
     needs: setup
@@ -39,19 +42,17 @@ jobs:
     steps:
       - name: Install + Up Tailscale
         run: |
-          $ts = "$env:ProgramFiles/Tailscale/tailscale"
-          if (-not (Test-Path $ts)) {
-            $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-            $dst = "$env:TEMP/tailscale.msi"
-            Invoke-WebRequest -Uri $url -OutFile $dst
-            Start-Process msiexec.exe -ArgumentList "/i","`"$dst`"","/quiet","/norestart" -Wait
-            Remove-Item $dst -Force
-          }
-          & $ts logout | Out-Null
-          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "ubuntu-${{ matrix.id }}" --accept-dns=true --accept-routes=true
-          $ip4 = & $ts ip -4 | Select-Object -First 1
-          "TAILSCALE_IP=$ip4" | Out-File -Append $env:GITHUB_ENV
-          Write-Host "Tailscale IPv4: $ip4"
+          if ! command -v tailscale &> /dev/null; then
+            curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
+            sudo apt-add-repository "deb https://pkgs.tailscale.com/stable/ubuntu focal main"
+            sudo apt-get update
+            sudo apt-get install -y tailscale
+          fi
+          tailscale logout
+          tailscale up --authkey "${{ inputs.ts_authkey }}" --hostname "ubuntu-${{ matrix.id }}" --accept-dns=true --accept-routes=true
+          ip4=$(tailscale ip -4 | head -n 1)
+          echo "TAILSCALE_IP=$ip4" >> $GITHUB_ENV
+          echo "Tailscale IPv4: $ip4"
 
       - name: Install XFCE and GUI tools
         run: |
@@ -72,7 +73,6 @@ jobs:
             +extension GLX \
             +render \
             -noreset &
-
           sleep 3
 
       - name: Start XFCE
@@ -82,7 +82,6 @@ jobs:
           dbus-launch \
             --exit-with-session \
             startxfce4 &
-
           sleep 10
 
       - name: Enable RDP
@@ -93,9 +92,9 @@ jobs:
 
       - name: Keep alive (to ${{ env.RUNTIME_MINUTES }} mins)
         run: |
-          $mins = [int]"${{ env.RUNTIME_MINUTES }}"
-          $end = (Get-Date).AddMinutes($mins)
-          while ((Get-Date) -lt $end) {
-            Write-Host "Heartbeat " + (Get-Date).ToString("HH:mm:ss") + " ends at " + $end.ToString("HH:mm:ss")
-            Start-Sleep -Seconds 60
-          }
+          mins=${{ inputs.runtime_minutes }}
+          end=$(date -d "+$mins minutes" +%s)
+          while [ $(date +%s) -lt $end ]; do
+            echo "Heartbeat $(date -u '+%H:%M:%S') ends at $(date -d "@$end" -u '+%H:%M:%S')"
+            sleep 60
+          done
