@@ -1,505 +1,74 @@
-name: AmneziaWG VPS Server
+name: Ubuntu Tailscale SSH
 
 on:
   workflow_dispatch:
     inputs:
-      ts_authkey:
-        description: "Tailscale Auth key"
+      tailscale_auth_key:
+        description: "Tailscale Auth Key"
         required: true
+        type: string
 
-      public_ip:
-        description: "Public IPv4 VPS"
+      ssh_public_key:
+        description: "SSH Public Key dari Termux"
         required: true
-
-      awg_port:
-        description: "AmneziaWG UDP port"
-        required: false
-        default: "16978"
-
-      runtime_minutes:
-        description: "Runtime server (maks 355 menit)"
-        required: false
-        default: "355"
-
-permissions:
-  contents: read
-
-defaults:
-  run:
-    shell: bash
+        type: string
 
 jobs:
-  awg:
+  ubuntu:
     runs-on: ubuntu-latest
-    timeout-minutes: 370
-
-    env:
-      DEBIAN_FRONTEND: noninteractive
-      AWG_PORT: ${{ inputs.awg_port }}
-      AWG_PUBLIC_IP: ${{ inputs.public_ip }}
+    timeout-minutes: 350
 
     steps:
+      - name: Setup SSH + Tailscale
+        env:
+          TS_AUTHKEY: ${{ inputs.tailscale_auth_key }}
+          SSH_PUBKEY: ${{ inputs.ssh_public_key }}
 
-      - name: Install dependencies
         run: |
-          set -e
+          echo "::add-mask::$TS_AUTHKEY"
 
-          sudo apt-get update -y
+          echo "=== Install SSH ==="
+          sudo apt-get update
+          sudo apt-get install -y openssh-server curl
 
-          sudo apt-get install -y \
-            curl \
-            git \
-            make \
-            gcc \
-            iproute2 \
-            iptables \
-            qrencode \
-            openssh-server \
-            python3
+          sudo systemctl enable ssh
+          sudo systemctl start ssh
 
-      - name: Install AmneziaWG tools
-        run: |
-          set -e
+          echo "=== Setup SSH Key ==="
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
 
-          git clone --depth 1 \
-            https://github.com/amnezia-vpn/amneziawg-tools.git \
-            /tmp/amneziawg-tools
+          printf '%s\n' "$SSH_PUBKEY" >> "$HOME/.ssh/authorized_keys"
 
-          cd /tmp/amneziawg-tools/src
+          chmod 600 "$HOME/.ssh/authorized_keys"
 
-          make
-          sudo make install
+          echo "=== Install Tailscale ==="
+          curl -fsSL https://tailscale.com/install.sh | sh
 
-          command -v awg
-          command -v awg-quick
-
-      - name: Install AmneziaWG kernel module
-        run: |
-          set -e
-
-          sudo apt-get install -y \
-            dkms \
-            linux-headers-$(uname -r)
-
-          git clone --depth 1 \
-            https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git \
-            /tmp/amneziawg-kmod
-
-          cd /tmp/amneziawg-kmod
-
-          sudo make dkms-install
-
-          sudo modprobe amneziawg
-
-      - name: Enable IP forwarding
-        run: |
-          sudo tee /etc/sysctl.d/99-amneziawg.conf > /dev/null <<'EOF'
-          net.ipv4.ip_forward=1
-          net.ipv6.conf.all.forwarding=1
-          EOF
-
-          sudo sysctl --system
-
-      - name: Install Tailscale
-        run: |
-          set -e
-
-          curl -fsSL https://tailscale.com/install.sh | sudo sh
-
-          sudo tailscale logout 2>/dev/null || true
-
+          echo "=== Connect Tailscale ==="
           sudo tailscale up \
-            --authkey="${{ inputs.ts_authkey }}" \
-            --hostname="awg-vps" \
-            --accept-dns=true \
-            --accept-routes=true \
-            --ssh
+            --authkey="$TS_AUTHKEY" \
+            --hostname="github-runner-${GITHUB_RUN_ID}"
 
-      - name: Create AWG server
+          sleep 3
+
+          IP=$(tailscale ip -4)
+          USERNAME=$(whoami)
+
+          echo ""
+          echo "================================"
+          echo "   SSH CONNECTION INFORMATION"
+          echo "================================"
+          echo "User : $USERNAME"
+          echo "IP   : $IP"
+          echo "Port : 22"
+          echo ""
+          echo "Termux:"
+          echo "ssh -i ~/.ssh/gha_ed25519 $USERNAME@$IP"
+          echo "================================"
+
+      - name: Keep Runner Alive
         run: |
-          set -e
-
-          sudo mkdir -p \
-            /etc/amneziawg \
-            /etc/amneziawg/clients
-
-          sudo chmod 700 /etc/amneziawg
-          sudo chmod 700 /etc/amneziawg/clients
-
-          if [ ! -f /etc/amneziawg/server_private.key ]; then
-            sudo awg genkey | \
-              sudo tee /etc/amneziawg/server_private.key | \
-              sudo awg pubkey | \
-              sudo tee /etc/amneziawg/server_public.key > /dev/null
-          fi
-
-          SERVER_PRIVATE=$(sudo cat /etc/amneziawg/server_private.key)
-
-          WAN_IF=$(ip route show default | awk '/default/ {print $5; exit}')
-
-          if [ -z "$WAN_IF" ]; then
-            echo "WAN interface tidak ditemukan."
-            exit 1
-          fi
-
-          sudo tee /etc/amneziawg/awg0.conf > /dev/null <<EOF
-          [Interface]
-          Address = 10.66.66.1/24
-          ListenPort = ${AWG_PORT}
-          PrivateKey = ${SERVER_PRIVATE}
-
-          Jc = 4
-          Jmin = 40
-          Jmax = 70
-          S1 = 50
-          S2 = 100
-          H1 = 2112615044
-          H2 = 3641400900
-          H3 = 4133943628
-          H4 = 3466609064
-
-          PostUp = iptables -A FORWARD -i awg0 -j ACCEPT
-          PostUp = iptables -A FORWARD -o awg0 -j ACCEPT
-          PostUp = iptables -t nat -A POSTROUTING -o ${WAN_IF} -j MASQUERADE
-
-          PostDown = iptables -D FORWARD -i awg0 -j ACCEPT
-          PostDown = iptables -D FORWARD -o awg0 -j ACCEPT
-          PostDown = iptables -t nat -D POSTROUTING -o ${WAN_IF} -j MASQUERADE
-          EOF
-
-          sudo chmod 600 /etc/amneziawg/awg0.conf
-          sudo chmod 600 /etc/amneziawg/server_private.key
-
-          echo
-          echo "========================================"
-          echo "AWG SERVER PUBLIC KEY"
-          echo "========================================"
-          sudo cat /etc/amneziawg/server_public.key
-          echo
-
-      - name: Create awgctl
-        run: |
-          sudo tee /usr/local/bin/awgctl > /dev/null <<'PYEOF'
-          #!/usr/bin/env python3
-
-          import os
-          import sys
-          import subprocess
-          import ipaddress
-          import re
-
-          BASE = "/etc/amneziawg"
-          SERVER_CONF = f"{BASE}/awg0.conf"
-          CLIENT_DIR = f"{BASE}/clients"
-
-          NETWORK = ipaddress.ip_network("10.66.66.0/24")
-          SERVER_IP = ipaddress.ip_address("10.66.66.1")
-
-          def run(cmd, stdin=None):
-              p = subprocess.run(
-                  cmd,
-                  input=stdin,
-                  text=True,
-                  stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE
-              )
-
-              if p.returncode != 0:
-                  print(p.stderr, file=sys.stderr)
-                  sys.exit(p.returncode)
-
-              return p.stdout.strip()
-
-          def fail(msg):
-              print(f"ERROR: {msg}", file=sys.stderr)
-              sys.exit(1)
-
-          def check_name(name):
-              if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
-                  fail(
-                      "Nama client hanya boleh A-Z, a-z, 0-9, _ dan - "
-                      "(maks 32 karakter)."
-                  )
-
-          def get_server_public_key():
-              path = f"{BASE}/server_public.key"
-
-              if not os.path.exists(path):
-                  private = open(
-                      f"{BASE}/server_private.key"
-                  ).read().strip()
-
-                  public = run(
-                      ["awg", "pubkey"],
-                      private
-                  )
-
-                  with open(path, "w") as f:
-                      f.write(public + "\n")
-
-              return open(path).read().strip()
-
-          def used_ips():
-              result = {SERVER_IP}
-
-              if not os.path.exists(SERVER_CONF):
-                  return result
-
-              with open(SERVER_CONF) as f:
-                  for line in f:
-                      if line.startswith("# ClientAddress="):
-                          try:
-                              result.add(
-                                  ipaddress.ip_address(
-                                      line.split("=", 1)[1].strip()
-                                  )
-                              )
-                          except ValueError:
-                              pass
-
-              return result
-
-          def next_ip():
-              used = used_ips()
-
-              for ip in NETWORK.hosts():
-                  if ip not in used:
-                      return str(ip)
-
-              fail("IP client 10.66.66.0/24 sudah habis.")
-
-          def add(name):
-              check_name(name)
-
-              client_file = f"{CLIENT_DIR}/{name}.conf"
-
-              if os.path.exists(client_file):
-                  fail(f"Client '{name}' sudah ada.")
-
-              private = run(["awg", "genkey"])
-              public = run(["awg", "pubkey"], private)
-              psk = run(["awg", "genpsk"])
-
-              address = next_ip()
-              server_public = get_server_public_key()
-
-              endpoint = os.environ.get("AWG_PUBLIC_IP", "").strip()
-              port = os.environ.get("AWG_PORT", "16978").strip()
-
-              if not endpoint:
-                  fail("AWG_PUBLIC_IP belum tersedia.")
-
-              if not re.fullmatch(r"[0-9]{1,5}", port):
-                  fail("AWG_PORT tidak valid.")
-
-              server_peer = (
-                  "\n"
-                  f"# Client={name}\n"
-                  f"# ClientAddress={address}\n"
-                  "[Peer]\n"
-                  f"PublicKey = {public}\n"
-                  f"PresharedKey = {psk}\n"
-                  f"AllowedIPs = {address}/32\n"
-              )
-
-              with open(SERVER_CONF, "a") as f:
-                  f.write(server_peer)
-
-              client_conf = f"""[Interface]
-          PrivateKey = {private}
-          Address = {address}/24
-          DNS = 1.1.1.1,8.8.8.8
-
-          Jc = 4
-          Jmin = 40
-          Jmax = 70
-          S1 = 50
-          S2 = 100
-          H1 = 2112615044
-          H2 = 3641400900
-          H3 = 4133943628
-          H4 = 3466609064
-
-          [Peer]
-          PublicKey = {server_public}
-          PresharedKey = {psk}
-          Endpoint = {endpoint}:{port}
-          AllowedIPs = 0.0.0.0/0, ::/0
-          PersistentKeepalive = 25
-          """
-
-              with open(client_file, "w") as f:
-                  f.write(client_conf)
-
-              os.chmod(client_file, 0o600)
-
-              run(
-                  ["awg", "syncconf", "awg0", SERVER_CONF]
-              )
-
-              print()
-              print("========================================")
-              print(f" CLIENT : {name}")
-              print(f" ADDRESS: {address}")
-              print(f" FILE   : {client_file}")
-              print("========================================")
-              print()
-              print(client_conf)
-
-          def list_clients():
-              files = sorted(
-                  x for x in os.listdir(CLIENT_DIR)
-                  if x.endswith(".conf")
-              )
-
-              if not files:
-                  print("Belum ada client.")
-                  return
-
-              for filename in files:
-                  print(filename[:-5])
-
-          def show(name):
-              check_name(name)
-
-              path = f"{CLIENT_DIR}/{name}.conf"
-
-              if not os.path.exists(path):
-                  fail(f"Client '{name}' tidak ditemukan.")
-
-              print(open(path).read())
-
-          def remove(name):
-              check_name(name)
-
-              path = f"{CLIENT_DIR}/{name}.conf"
-
-              if not os.path.exists(path):
-                  fail(f"Client '{name}' tidak ditemukan.")
-
-              with open(SERVER_CONF) as f:
-                  lines = f.readlines()
-
-              output = []
-              i = 0
-
-              while i < len(lines):
-                  if lines[i].strip() == f"# Client={name}":
-                      i += 1
-
-                      while i < len(lines):
-                          if lines[i].strip() == "[Peer]":
-                              i += 1
-
-                              while i < len(lines):
-                                  if lines[i].startswith("# Client="):
-                                      break
-
-                                  if lines[i].strip() == "[Peer]":
-                                      break
-
-                                  i += 1
-
-                              break
-
-                          i += 1
-
-                      continue
-
-                  output.append(lines[i])
-                  i += 1
-
-              with open(SERVER_CONF, "w") as f:
-                  f.writelines(output)
-
-              os.remove(path)
-
-              run(
-                  ["awg", "syncconf", "awg0", SERVER_CONF]
-              )
-
-              print(f"Removed: {name}")
-
-          def usage():
-              print("Usage:")
-              print("  awgctl add <name>")
-              print("  awgctl list")
-              print("  awgctl show <name>")
-              print("  awgctl remove <name>")
-
-          if len(sys.argv) < 2:
-              usage()
-              sys.exit(1)
-
-          command = sys.argv[1]
-
-          if command == "add" and len(sys.argv) == 3:
-              add(sys.argv[2])
-
-          elif command == "list" and len(sys.argv) == 2:
-              list_clients()
-
-          elif command == "show" and len(sys.argv) == 3:
-              show(sys.argv[2])
-
-          elif command == "remove" and len(sys.argv) == 3:
-              remove(sys.argv[2])
-
-          else:
-              usage()
-              sys.exit(1)
-          PYEOF
-
-          sudo chmod +x /usr/local/bin/awgctl
-
-      - name: Start AWG
-        run: |
-          set -e
-
-          sudo awg-quick down awg0 2>/dev/null || true
-          sudo awg-quick up awg0
-
-          echo
-          echo "========================================"
-          echo " AMNEZIAWG SERVER ONLINE"
-          echo "========================================"
-
-          echo
-          echo "Endpoint:"
-          echo "${AWG_PUBLIC_IP}:${AWG_PORT}"
-
-          echo
-          echo "Server public key:"
-          sudo cat /etc/amneziawg/server_public.key
-
-          echo
-          echo "Commands:"
-          echo "  sudo awgctl add hp1"
-          echo "  sudo awgctl add laptop"
-          echo "  sudo awgctl list"
-          echo "  sudo awgctl show hp1"
-          echo "  sudo awgctl remove hp1"
-          echo
-
-          sudo awg show awg0
-
-      - name: Keep server alive
-        run: |
-          RT="${{ inputs.runtime_minutes }}"
-
-          [[ ! "$RT" =~ ^[0-9]+$ ]] && RT=355
-          [[ "$RT" -lt 1 ]] && RT=355
-          [[ "$RT" -gt 355 ]] && RT=355
-
-          END=$((SECONDS + RT * 60))
-
-          while [ "$SECONDS" -lt "$END" ]; do
-            REMAIN=$(( (END - SECONDS) / 60 ))
-
-            echo
-            echo "[AWG] $(date '+%H:%M:%S') | sisa ${REMAIN} menit"
-
-            sudo awg show awg0 2>/dev/null || true
-
-            sleep 60
-          done
+          echo "Runner aktif."
+          echo "Jangan stop workflow kalau masih mau SSH."
+          sleep 21000
