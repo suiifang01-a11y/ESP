@@ -368,26 +368,57 @@ jobs:
           echo "======================================"
           echo
 
-      - name: Verify services
+            - name: Verify services
         run: |
+          set -u
+
           echo "===== XRDP ====="
-          sudo systemctl is-active xrdp
-          sudo systemctl status xrdp --no-pager -n 10 || true
+          sudo systemctl is-active --quiet xrdp
+          echo "xrdp: active"
+
+          sudo systemctl is-active --quiet xrdp-sesman || {
+            echo "ERROR: xrdp-sesman is not active"
+            sudo systemctl status xrdp-sesman --no-pager || true
+            exit 1
+          }
 
           echo
           echo "===== XFCE ====="
-          command -v startxfce4
-          command -v xfce4-session
-          command -v xfconfd
-          command -v dbus-run-session
+
+          for bin in startxfce4 xfce4-session dbus-run-session; do
+            if command -v "$bin" >/dev/null 2>&1; then
+              echo "$bin: $(command -v "$bin")"
+            else
+              echo "ERROR: $bin not found"
+              exit 1
+            fi
+          done
+
+          echo
+          echo "===== XFCONF ====="
+
+          XFCONFD="$(find /usr -type f -name xfconfd -executable 2>/dev/null | head -n1 || true)"
+
+          if [[ -n "$XFCONFD" ]]; then
+            echo "xfconfd: $XFCONFD"
+          else
+            echo "WARNING: xfconfd executable not found in /usr"
+          fi
 
           echo
           echo "===== DISPLAY ====="
-          echo "DISPLAY=$DISPLAY"
+          echo "DISPLAY=${DISPLAY:-not-set}"
 
           echo
           echo "===== TAILSCALE ====="
           sudo tailscale status
+
+          echo
+          echo "===== NETWORK ====="
+          echo "Tailscale IPv4: ${TAILSCALE_IP:-not-set}"
+
+          echo
+          echo "Verification complete."
 
       - name: Keep alive
         run: |
