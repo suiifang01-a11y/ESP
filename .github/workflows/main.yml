@@ -75,7 +75,7 @@ jobs:
       max-parallel: 10
     timeout-minutes: 370
     env:
-      RDP_USER: bulletuser
+      RDP_USER: Bullettemporary
       RDP_PASS: Bullet@12345
       DEBIAN_FRONTEND: noninteractive
 
@@ -115,16 +115,34 @@ jobs:
       # ── 3. Konfigurasi xrdp + xfce4 (proven pattern) ─────────────────────────
       - name: Configure xrdp + xfce4
         run: |
-          # startwm.sh: comment out 2 baris default, append startxfce4
-          sudo sed -i 's|^test -x /etc/X11/Xsession.*|#&|' /etc/xrdp/startwm.sh
-          sudo sed -i 's|^exec /bin/sh /etc/X11/Xsession.*|#&|' /etc/xrdp/startwm.sh
-          grep -q 'startxfce4' /etc/xrdp/startwm.sh \
-            || echo 'startxfce4' | sudo tee -a /etc/xrdp/startwm.sh > /dev/null
+          # Tulis ulang startwm.sh dengan XDG + D-Bus env yang benar
+          # Ini fix untuk: "xfconfd isn't running" + "XDG_CONFIG_DIRS must include /etc"
+          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'STARTWM'
+          #!/bin/sh
+          # Fix D-Bus + XDG environment untuk xrdp session
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+
+          export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_DATA_DIRS=/usr/local/share:/usr/share
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export XDG_SESSION_TYPE=x11
+
+          # Start D-Bus session
+          if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+            eval $(dbus-launch --sh-syntax --exit-with-session)
+            export DBUS_SESSION_BUS_ADDRESS
+          fi
+
+          exec startxfce4
+          STARTWM
+          sudo chmod +x /etc/xrdp/startwm.sh
 
           # Allowed users: anybody (bukan hanya console)
           echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config > /dev/null
 
-          # Polkit fix — tanpa ini session langsung disconnect di beberapa env
+          # Polkit fix — tanpa ini session langsung disconnect
           sudo mkdir -p /etc/polkit-1/localauthority/50-local.d/
           sudo tee /etc/polkit-1/localauthority/50-local.d/xrdp-allow.pkla > /dev/null << 'PKLA'
           [Allow RDP users colord]
@@ -154,8 +172,19 @@ jobs:
           echo "$U:$P" | sudo chpasswd
           sudo usermod -aG sudo,xrdp "$U"
 
-          # .xsession untuk user ini
-          echo 'startxfce4' | sudo tee /home/$U/.xsession > /dev/null
+          # .xsession dengan XDG env fix untuk user ini
+          sudo tee /home/$U/.xsession > /dev/null << 'XSESSION'
+          #!/bin/sh
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_DATA_DIRS=/usr/local/share:/usr/share
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export XDG_SESSION_TYPE=x11
+          exec startxfce4
+          XSESSION
+          sudo chmod +x /home/$U/.xsession
           sudo chown $U:$U /home/$U/.xsession
 
           echo "RDP user: $U | pass: $P"
