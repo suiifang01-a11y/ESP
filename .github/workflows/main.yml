@@ -1,58 +1,69 @@
-name: Generate AWG Configs
+name: Ubuntu AWG SSH
 
 on:
   workflow_dispatch:
     inputs:
-      jumlah:
-        description: "Jumlah config"
+      awg_private_key:
+        description: "PrivateKey client AWG untuk runner"
         required: true
-        default: "3"
         type: string
-
-      ip_awal:
-        description: "IP awal client"
+      awg_server_public_key:
+        description: "PublicKey server AWG"
         required: true
-        default: "10.66.66.61"
+        type: string
+      awg_preshared_key:
+        description: "PresharedKey"
+        required: true
+        type: string
+      awg_address:
+        description: "Address runner"
+        required: true
+        default: "10.66.66.61/24"
+        type: string
+      ssh_public_key:
+        description: "SSH Public Key Termux"
+        required: true
         type: string
 
 jobs:
-  generate:
+  runner:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
 
     steps:
-      - name: Install tools
+      - name: Install SSH + WireGuard tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wireguard-tools zip
+          sudo apt-get install -y openssh-server wireguard-tools curl
 
-      - name: Generate AWG configs
+          sudo systemctl enable ssh
+          sudo systemctl start ssh
+
+      - name: Setup SSH key
         env:
-          JUMLAH: ${{ inputs.jumlah }}
-          IP_AWAL: ${{ inputs.ip_awal }}
-          ENDPOINT: "103.235.72.131:16978"
-          SERVER_PUBLIC_KEY: "692CvI8V+exhrfBzofx1innWxsDDRA2eHuDcT6GpLVE="
+          SSH_PUBKEY: ${{ inputs.ssh_public_key }}
         run: |
-          set -e
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
 
-          mkdir -p AWG_CONFIGS
+          printf '%s\n' "$SSH_PUBKEY" \
+            > "$HOME/.ssh/authorized_keys"
 
-          IFS='.' read -r A B C D <<< "$IP_AWAL"
+          chmod 600 "$HOME/.ssh/authorized_keys"
 
-          for ((i=0; i<JUMLAH; i++)); do
+      - name: Setup AWG config
+        env:
+          PRIVATE_KEY: ${{ inputs.awg_private_key }}
+          SERVER_PUBLIC_KEY: ${{ inputs.awg_server_public_key }}
+          PSK: ${{ inputs.awg_preshared_key }}
+          ADDRESS: ${{ inputs.awg_address }}
+        run: |
+          sudo mkdir -p /etc/wireguard
 
-            IP="$A.$B.$C.$((D+i))"
-
-            PRIVATE_KEY=$(wg genkey)
-            PUBLIC_KEY=$(printf '%s' "$PRIVATE_KEY" | wg pubkey)
-
-            PSK=$(wg genpsk)
-
-            NAME="CLIENT_$((i+1))"
-
-            cat > "AWG_CONFIGS/${NAME}.conf" <<EOF
+          sudo tee /etc/wireguard/awg0.conf > /dev/null <<EOF
           [Interface]
           PrivateKey = $PRIVATE_KEY
-          Address = ${IP}/24
+          Address = $ADDRESS
           DNS = 1.1.1.1,8.8.8.8
 
           Jc = 4
@@ -68,24 +79,27 @@ jobs:
           [Peer]
           PublicKey = $SERVER_PUBLIC_KEY
           PresharedKey = $PSK
-          Endpoint = $ENDPOINT
+          Endpoint = 103.235.72.131:16978
           AllowedIPs = 0.0.0.0/0, ::/0
           PersistentKeepalive = 25
           EOF
 
-            echo "================================"
-            echo "$NAME"
-            echo "IP         : $IP"
-            echo "PublicKey  : $PUBLIC_KEY"
-            echo "================================"
+          sudo chmod 600 /etc/wireguard/awg0.conf
 
-          done
+      - name: Start AWG interface
+        run: |
+          sudo wg-quick up awg0 || true
+          sleep 3
 
-          zip -r AWG_CONFIGS.zip AWG_CONFIGS
+          echo "===== AWG ====="
+          sudo wg show awg0 || true
 
-      - name: Upload ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: AWG_CONFIGS
-          path: AWG_CONFIGS.zip
-          retention-days: 1
+          echo "===== SSH ====="
+          echo "User: $(whoami)"
+          echo "AWG:"
+          ip -4 addr show awg0 || true
+
+      - name: Keep runner alive
+        run: |
+          echo "Runner aktif selama job berjalan."
+          sleep 21000
