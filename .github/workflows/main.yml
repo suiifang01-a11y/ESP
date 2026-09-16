@@ -42,7 +42,6 @@ defaults:
     shell: bash
 
 jobs:
-  # ─── Job 1: Hitung matrix ───────────────────────────────────────────────────
   setup:
     runs-on: ubuntu-latest
     outputs:
@@ -54,19 +53,15 @@ jobs:
           N=${{ inputs.rdp_count }}
           [[ "$N" -lt 1 ]] 2>/dev/null && N=1
           [[ "$N" -gt 10 ]] 2>/dev/null && N=10
-
           INCLUDE="["
           for i in $(seq 1 $N); do
             [[ $i -gt 1 ]] && INCLUDE="${INCLUDE},"
             INCLUDE="${INCLUDE}{\"id\":$i}"
           done
           INCLUDE="${INCLUDE}]"
-
           echo "matrix={\"include\":${INCLUDE}}" >> "$GITHUB_OUTPUT"
-          [[ "$N" -gt 1 ]] && echo "multi=1" >> "$GITHUB_OUTPUT" \
-                            || echo "multi=0" >> "$GITHUB_OUTPUT"
+          [[ "$N" -gt 1 ]] && echo "multi=1" >> "$GITHUB_OUTPUT" || echo "multi=0" >> "$GITHUB_OUTPUT"
 
-  # ─── Job 2: Setup RDP per instance ──────────────────────────────────────────
   rdp:
     needs: setup
     runs-on: ubuntu-latest
@@ -78,26 +73,25 @@ jobs:
       RDP_USER: Bullettemporary
       RDP_PASS: Bullet@12345
       DEBIAN_FRONTEND: noninteractive
+      # base64 dari: #!/bin/sh + unset DBUS + XDG vars + exec startxfce4
+      STARTWM_B64: IyEvYmluL3NoCnVuc2V0IERCVVNfU0VTU0lPTl9CVVNfQUREUkVTUwp1bnNldCBYREdfUlVOVElNRV9ESVIKZXhwb3J0IFhER19DT05GSUdfRElSUz0vZXRjL3hkZwpleHBvcnQgWERHX0RBVEFfRElSUz0vdXNyL2xvY2FsL3NoYXJlOi91c3Ivc2hhcmUKZXhwb3J0IFhER19DVVJSRU5UX0RFU0tUT1A9WEZDRQpleHBvcnQgWERHX1NFU1NJT05fREVTS1RPUD14ZmNlCmV4cG9ydCBYREdfU0VTU0lPTl9UWVBFPXgxMQpleGVjIHN0YXJ0eGZjZTQK
+      # base64 dari polkit .pkla content
+      PKLA_B64: W0FsbG93IFJEUCBjb2xvcmRdCklkZW50aXR5PXVuaXgtZ3JvdXA6c3VkbwpBY3Rpb249b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIuY3JlYXRlLWRldmljZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5jcmVhdGUtcHJvZmlsZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5kZWxldGUtZGV2aWNlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLmRlbGV0ZS1wcm9maWxlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLm1vZGlmeS1kZXZpY2U7b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIubW9kaWZ5LXByb2ZpbGUKUmVzdWx0QW55PW5vClJlc3VsdEluYWN0aXZlPW5vClJlc3VsdEFjdGl2ZT15ZXMK
 
     steps:
-      # ── 1. Tentukan hostname + runtime ────────────────────────────────────────
       - name: Set hostname + runtime
         run: |
           N="${{ inputs.rdp_count }}"
-          [[ "$N" -gt 1 ]] 2>/dev/null \
-            && HN="bullet${{ matrix.id }}" \
-            || HN="bullet"
+          [[ "$N" -gt 1 ]] 2>/dev/null && HN="bullet${{ matrix.id }}" || HN="bullet"
           echo "TS_HOSTNAME=$HN" >> "$GITHUB_ENV"
-
           RT="${{ inputs.runtime_minutes }}"
           [[ "${{ inputs.quick_test }}" == "true" ]] && RT=5
-          [[ ! "$RT" =~ ^[0-9]+$ ]]  && RT=355
-          [[ "$RT" -lt 6 ]]           && RT=355
-          [[ "$RT" -gt 355 ]]         && RT=355
+          [[ ! "$RT" =~ ^[0-9]+$ ]] && RT=355
+          [[ "$RT" -lt 6 ]]         && RT=355
+          [[ "$RT" -gt 355 ]]       && RT=355
           echo "RUNTIME_MINUTES=$RT" >> "$GITHUB_ENV"
           echo "Hostname: $HN | Runtime: $RT min"
 
-      # ── 2. Install semua package sekaligus ────────────────────────────────────
       - name: Install dependencies
         run: |
           sudo apt-get update -y
@@ -105,114 +99,74 @@ jobs:
             xrdp \
             xfce4 \
             xfce4-terminal \
+            xfce4-session \
             xfce4-goodies \
+            xfconf \
             dbus-x11 \
             ufw \
             curl \
             wget \
             python3
 
-      # ── 3. Konfigurasi xrdp + xfce4 (proven pattern) ─────────────────────────
       - name: Configure xrdp + xfce4
         run: |
-          # Tulis ulang startwm.sh dengan XDG + D-Bus env yang benar
-          # Ini fix untuk: "xfconfd isn't running" + "XDG_CONFIG_DIRS must include /etc"
-          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'STARTWM'
-          #!/bin/sh
-          # Fix D-Bus + XDG environment untuk xrdp session
-          unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
-
-          export XDG_CONFIG_DIRS=/etc/xdg
-          export XDG_DATA_DIRS=/usr/local/share:/usr/share
-          export XDG_CURRENT_DESKTOP=XFCE
-          export XDG_SESSION_DESKTOP=xfce
-          export XDG_SESSION_TYPE=x11
-
-          # Start D-Bus session
-          if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-            eval $(dbus-launch --sh-syntax --exit-with-session)
-            export DBUS_SESSION_BUS_ADDRESS
-          fi
-
-          exec startxfce4
-          STARTWM
+          # Decode base64 -> tulis file tanpa heredoc / indentation issue
+          echo "$STARTWM_B64" | base64 -d | sudo tee /etc/xrdp/startwm.sh > /dev/null
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          # Allowed users: anybody (bukan hanya console)
+          echo "--- startwm.sh content (verify no leading spaces) ---"
+          cat -A /etc/xrdp/startwm.sh
+          echo "------------------------------------------------------"
+
+          # Allowed users
           echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config > /dev/null
 
-          # Polkit fix — tanpa ini session langsung disconnect
+          # Polkit fix via base64 decode
           sudo mkdir -p /etc/polkit-1/localauthority/50-local.d/
-          sudo tee /etc/polkit-1/localauthority/50-local.d/xrdp-allow.pkla > /dev/null << 'PKLA'
-          [Allow RDP users colord]
-          Identity=unix-group:sudo
-          Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.create-profile;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.delete-profile;org.freedesktop.color-manager.modify-device;org.freedesktop.color-manager.modify-profile
-          ResultAny=no
-          ResultInactive=no
-          ResultActive=yes
-          PKLA
+          echo "$PKLA_B64" | base64 -d | sudo tee /etc/polkit-1/localauthority/50-local.d/xrdp-allow.pkla > /dev/null
 
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
           sleep 3
           sudo systemctl is-active xrdp \
-            && echo "xrdp: running" \
-            || { echo "ERROR: xrdp failed to start"; sudo journalctl -u xrdp --no-pager -n 30; exit 1; }
+            && echo "xrdp: running OK" \
+            || { echo "ERROR: xrdp failed"; sudo journalctl -u xrdp --no-pager -n 30; exit 1; }
 
-      # ── 4. Buat user RDP ──────────────────────────────────────────────────────
       - name: Create RDP user
         run: |
           U="$RDP_USER"
           P="$RDP_PASS"
-
           if ! id "$U" &>/dev/null; then
             sudo useradd -m -s /bin/bash "$U"
           fi
           echo "$U:$P" | sudo chpasswd
           sudo usermod -aG sudo,xrdp "$U"
 
-          # .xsession dengan XDG env fix untuk user ini
-          sudo tee /home/$U/.xsession > /dev/null << 'XSESSION'
-          #!/bin/sh
-          unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
-          export XDG_CONFIG_DIRS=/etc/xdg
-          export XDG_DATA_DIRS=/usr/local/share:/usr/share
-          export XDG_CURRENT_DESKTOP=XFCE
-          export XDG_SESSION_DESKTOP=xfce
-          export XDG_SESSION_TYPE=x11
-          exec startxfce4
-          XSESSION
+          # .xsession: sama dengan startwm.sh, decode base64
+          echo "$STARTWM_B64" | base64 -d | sudo tee /home/$U/.xsession > /dev/null
           sudo chmod +x /home/$U/.xsession
           sudo chown $U:$U /home/$U/.xsession
 
           echo "RDP user: $U | pass: $P"
 
-      # ── 5. Buka port RDP via ufw ──────────────────────────────────────────────
       - name: Open RDP port
         run: |
           sudo ufw allow 3389/tcp || true
           echo "Port 3389 opened."
 
-      # ── 6. Purge device bullet* lama (single-instance saja) ───────────────────
       - name: Purge old Tailscale devices
         if: ${{ needs.setup.outputs.multi == '0' && inputs.do_purge == 'true' }}
         run: |
           AUTH=$(echo -n "${{ inputs.ts_api_key }}:" | base64 -w0)
-          TN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
-               "${{ inputs.ts_tailnet }}")
-
-          DEVICES=$(curl -sf \
-            -H "Authorization: Basic $AUTH" \
+          TN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${{ inputs.ts_tailnet }}")
+          DEVICES=$(curl -sf -H "Authorization: Basic $AUTH" \
             "https://api.tailscale.com/api/v2/tailnet/$TN/devices") || {
-            echo "Warning: gagal fetch device list. Skip purge."; exit 0
+            echo "Warning: gagal fetch devices. Skip purge."; exit 0
           }
-
-          echo "$DEVICES" | python3 - << 'PY'
-          import sys, json, urllib.request
-          data = json.load(sys.stdin)
+          python3 << PYEOF
+          import json, urllib.request
           auth = "$AUTH"
+          data = json.loads("""$DEVICES""")
           for d in data.get("devices", []):
               if d.get("hostname", "").startswith("bullet"):
                   req = urllib.request.Request(
@@ -225,14 +179,12 @@ jobs:
                       print(f"Deleted: {d['hostname']}")
                   except Exception as e:
                       print(f"Warn: {e}")
-          PY
+          PYEOF
           echo "Purge selesai."
 
-      # ── 7. Install + connect Tailscale ────────────────────────────────────────
       - name: Install + connect Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sudo sh
-
           sudo tailscale logout 2>/dev/null || true
           sudo tailscale up \
             --authkey="${{ inputs.ts_authkey }}" \
@@ -240,28 +192,23 @@ jobs:
             --accept-dns=true \
             --accept-routes=true \
             --ssh
-
           IP4=$(sudo tailscale ip -4 2>/dev/null | head -1)
           echo "TAILSCALE_IP=$IP4" >> "$GITHUB_ENV"
-          echo "Tailscale IP: $IP4"
-          echo "────────────────────────────────────────────────"
-          echo "  RDP TARGET  : $IP4:3389"
-          echo "  USER        : $RDP_USER"
-          echo "  PASS        : $RDP_PASS"
-          echo "  HOSTNAME    : $TS_HOSTNAME"
-          echo "────────────────────────────────────────────────"
+          echo "══════════════════════════════════════"
+          echo "  RDP  : $IP4:3389"
+          echo "  USER : $RDP_USER"
+          echo "  PASS : $RDP_PASS"
+          echo "══════════════════════════════════════"
 
-      # ── 8. Keep alive ─────────────────────────────────────────────────────────
       - name: Keep alive
         run: |
           END=$((SECONDS + RUNTIME_MINUTES * 60))
           while [ $SECONDS -lt $END ]; do
             REMAIN=$(( (END - SECONDS) / 60 ))
-            echo "[RDP] $(date +%H:%M:%S) | sisa: ${REMAIN} menit | IP: ${TAILSCALE_IP} | host: ${TS_HOSTNAME}"
+            echo "[RDP] $(date +%H:%M:%S) | sisa: ${REMAIN} menit | ${TAILSCALE_IP}:3389"
             sleep 60
           done
 
-      # ── 9. Dispatch next cycle atau stop ──────────────────────────────────────
       - name: Dispatch next or stop
         if: always()
         env:
@@ -269,41 +216,25 @@ jobs:
         run: |
           CYCLES="${{ inputs.cycles }}"
           [[ ! "$CYCLES" =~ ^[0-9]+$ ]] && CYCLES=0
-
           if [[ "$CYCLES" -gt 0 ]]; then
             NEXT=$((CYCLES - 1))
             REPO="${{ github.repository }}"
             REF="${{ github.ref_name }}"
-            HDR_AUTH="Authorization: Bearer $GH_TOKEN"
-            HDR_ACCEPT="Accept: application/vnd.github+json"
-
             if [[ "$NEXT" -le 0 ]]; then
-              # Trigger stop workflow
               curl -sf -X POST \
-                -H "$HDR_AUTH" -H "$HDR_ACCEPT" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
                 -d "{\"ref\":\"$REF\",\"inputs\":{\"ts_tailnet\":\"${{ inputs.ts_tailnet }}\",\"ts_api_key\":\"${{ inputs.ts_api_key }}\",\"base_prefix\":\"bullet\",\"max_count\":\"10\",\"dry_run\":\"false\"}}" \
                 "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-stop.yml/dispatches"
               echo "Dispatched STOP."
             else
-              # Handoff ke run berikutnya
-              PAYLOAD=$(python3 -c "
-          import json
-          print(json.dumps({
-            'ts_authkey':      '${{ inputs.ts_authkey }}',
-            'ts_api_key':      '${{ inputs.ts_api_key }}',
-            'ts_tailnet':      '${{ inputs.ts_tailnet }}',
-            'do_purge':        '${{ inputs.do_purge }}',
-            'quick_test':      '${{ inputs.quick_test }}',
-            'runtime_minutes': '${{ inputs.runtime_minutes }}',
-            'rdp_count':       '${{ inputs.rdp_count }}',
-            'cycles':          str($NEXT)
-          }))
-          ")
+              PAYLOAD=$(python3 -c "import json; print(json.dumps({'ts_authkey':'${{ inputs.ts_authkey }}','ts_api_key':'${{ inputs.ts_api_key }}','ts_tailnet':'${{ inputs.ts_tailnet }}','do_purge':'${{ inputs.do_purge }}','quick_test':'${{ inputs.quick_test }}','runtime_minutes':'${{ inputs.runtime_minutes }}','rdp_count':'${{ inputs.rdp_count }}','cycles':str($NEXT)}))")
               curl -sf -X POST \
-                -H "$HDR_AUTH" -H "$HDR_ACCEPT" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
                 -d "{\"ref\":\"$REF\",\"inputs\":$PAYLOAD}" \
                 "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-ubuntu-clean.yml/dispatches"
-              echo "Dispatched next run, cycles=$NEXT"
+              echo "Dispatched next, cycles=$NEXT"
             fi
           else
             echo "cycles=0, session selesai."
