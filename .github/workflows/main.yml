@@ -44,6 +44,7 @@ defaults:
 jobs:
   setup:
     runs-on: ubuntu-latest
+
     outputs:
       matrix: ${{ steps.mk.outputs.matrix }}
       multi: ${{ steps.mk.outputs.multi }}
@@ -88,13 +89,9 @@ jobs:
       RDP_PASS: Bullet@12345
       DEBIAN_FRONTEND: noninteractive
 
-      # XFCE session:
-      # - clear inherited DBUS/XDG runtime variables
-      # - start XFCE inside a fresh D-Bus session
-      STARTWM_B64: ZWNobyAiaW5pdCB4ZnJlZGVza3RvcCIKZXhwb3J0IExBTkc9Qy5VVEYtOApleHBvcnQgTEFOR1VBR0U9Qy5VVEYtOApleHBvcnQgTENfQUxMPUMuVVRGLTgKdW5zZXQgREJVU19TRVNTSU9OX0JVU19BRERSRVNTCnVuc2V0IFhER19SVU5USU1FX0RJUgpmaSBbIC1yIC9ldGMvcHJvZmlsZSBdOyB0aGVuCiAgLiAvZXRjL3Byb2ZpbGUKZmkKaWYgWyAtciAiJEhPTUUvLnByb2ZpbGUiIF07IHRoZW4KICAuICIkSE9NRS8ucHJvZmlsZSIKZmkKZXhwb3J0IFhER19DT05GSUdfRElSUz0vZXRjL3hkZy9xdGQKZXhwb3J0IFhER19EQVRBX0RJUlM9L3Vzci9sb2NhbC9zaGFyZTovdXNyL3NoYXJlCmV4ZWMgZGJ1cy1ydW4tc2Vzc2lvbiAtLSBzdGFydHhmY2U0Cg==
+      STARTWM_B64: IyEvYmluL3NoCmV4cG9ydCBMQU5HPUMuVVRGLTgKZXhwb3J0IExBTkdVQUdFPUMuVVRGLTgKZXhwb3J0IExDX0FMTD1DLlVURi04Cgp1bnNldCBEQlVTX1NFU1NJT05fQlVTX0FERFJFU1MKdW5zZXQgWERHX1JVTlRJTUVfRElSCgppZiBbIC1yIC9ldGMvcHJvZmlsZSBdOyB0aGVuCiAgLiAvZXRjL3Byb2ZpbGUKZmkKCmlmIFsgLXIgIiRIT01FLy5wcm9maWxlIiBdOyB0aGVuCiAgLiAiJEhPTUUvLnByb2ZpbGUiCmZpCgpleHBvcnQgWERHX0NPTkZJR19ESVJTPS9ldGMveGRnOi9ldGMKZXhwb3J0IFhER19EQVRBX0RJUlM9L3Vzci9sb2NhbC9zaGFyZTovdXNyL3NoYXJlCgpleGVjIGRidXMtcnVuLXNlc3Npb24gLS0gc3RhcnR4ZmNlNAo=
 
-      # base64 dari polkit .pkla content
-      PKLA_B64: W0FsbG93IFJEUCBjb2xvcmRdCklkZW50aXR5PXVuaXgtZ3JvdXA6c3VkbwpBY3Rpb249b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIuY3JlYXRlLWRldmljZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5jcmVhdGUtcHJvZmlsZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5kZWxldGUtZGV2aWNlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLmRlbGV0ZS1wcm9maWxlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLm1vZGlmeS1kZXZpY2U7b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIubW9kaWZ5LXByb2ZpbGUKUmVzdWx0QW55PW5vClJlc3VsdEluYWN0aXZlPW5vClJlc3VsdEFjdGl2ZT15ZXMK
+      PKLA_B64: W0FsbG93IFJEUCBjb2xvcmRdCklkZW50aXR5PXVuaXgtZ3JvdXA6c3VkbwpBY3Rpb249b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIuY3JlYXRlLWRldmljZTtvcmcuZnJlZWRlc2tvcC5jb2xvci1tYW5hZ2VyLmNyZWF0ZS1wcm9maWxlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLmRlbGV0ZS1kZXZpY2U7b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIuZGVsZXRlLXByb2ZpbGU7b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIubW9kaWZ5LWRldmljZTtvcmcuZnJlZWRlc2tvcC5jb2xvci1tYW5hZ2VyLm1vZGlmeS1kZXZpY2UKUmVzdWx0QW55PW5vClJlc3VsdEluYWN0aXZlPW5vClJlc3VsdEFjdGl2ZT15ZXMK
 
     steps:
       - name: Set hostname + runtime
@@ -140,10 +137,13 @@ jobs:
 
       - name: Configure xrdp + xfce4
         run: |
-          echo "$STARTWM_B64" | base64 -d | sudo tee /etc/xrdp/startwm.sh > /dev/null
+          echo "$STARTWM_B64" | base64 -d | \
+            sudo tee /etc/xrdp/startwm.sh > /dev/null
+
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config > /dev/null
+          echo 'allowed_users=anybody' | \
+            sudo tee /etc/X11/Xwrapper.config > /dev/null
 
           sudo mkdir -p /etc/polkit-1/localauthority/50-local.d/
 
