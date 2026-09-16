@@ -7,13 +7,13 @@ on:
         description: "Tailscale Auth key (tskey-auth-...)"
         required: true
       ts_api_key:
-        description: "Tailscale API key (untuk purge device lama)"
+        description: "Tailscale API key"
         required: true
       ts_tailnet:
-        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        description: "Tailscale tailnet"
         required: true
       do_purge:
-        description: "Purge device bullet* lama di Tailscale sebelum mulai"
+        description: "Purge device bullet lama"
         required: false
         default: "true"
       quick_test:
@@ -29,7 +29,7 @@ on:
         required: false
         default: "1"
       cycles:
-        description: "0=stop setelah run ini; N=jumlah handoff tersisa"
+        description: "Jumlah handoff tersisa"
         required: false
         default: "0"
 
@@ -44,57 +44,85 @@ defaults:
 jobs:
   setup:
     runs-on: ubuntu-latest
+
     outputs:
       matrix: ${{ steps.mk.outputs.matrix }}
-      multi:  ${{ steps.mk.outputs.multi }}
+      multi: ${{ steps.mk.outputs.multi }}
+
     steps:
       - id: mk
         run: |
-          N=${{ inputs.rdp_count }}
-          [[ "$N" -lt 1 ]] 2>/dev/null && N=1
-          [[ "$N" -gt 10 ]] 2>/dev/null && N=10
+          N="${{ inputs.rdp_count }}"
+
+          [[ "$N" =~ ^[0-9]+$ ]] || N=1
+          [[ "$N" -lt 1 ]] && N=1
+          [[ "$N" -gt 10 ]] && N=10
+
           INCLUDE="["
-          for i in $(seq 1 $N); do
-            [[ $i -gt 1 ]] && INCLUDE="${INCLUDE},"
-            INCLUDE="${INCLUDE}{\"id\":$i}"
+
+          for i in $(seq 1 "$N"); do
+            [[ "$i" -gt 1 ]] && INCLUDE+=","
+            INCLUDE+="{\"id\":$i}"
           done
-          INCLUDE="${INCLUDE}]"
+
+          INCLUDE+="]"
+
           echo "matrix={\"include\":${INCLUDE}}" >> "$GITHUB_OUTPUT"
-          [[ "$N" -gt 1 ]] && echo "multi=1" >> "$GITHUB_OUTPUT" || echo "multi=0" >> "$GITHUB_OUTPUT"
+
+          if [[ "$N" -gt 1 ]]; then
+            echo "multi=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "multi=0" >> "$GITHUB_OUTPUT"
+          fi
 
   rdp:
     needs: setup
+
     runs-on: ubuntu-latest
+
     strategy:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       max-parallel: 10
+
     timeout-minutes: 370
+
     env:
       RDP_USER: Bullettemporary
       RDP_PASS: Bullet@12345
       DEBIAN_FRONTEND: noninteractive
-      # base64 dari: #!/bin/sh + unset DBUS + XDG vars + exec startxfce4
-      STARTWM_B64: IyEvYmluL3NoCnVuc2V0IERCVVNfU0VTU0lPTl9CVVNfQUREUkVTUwp1bnNldCBYREdfUlVOVElNRV9ESVIKZXhwb3J0IFhER19DT05GSUdfRElSUz0vZXRjL3hkZwpleHBvcnQgWERHX0RBVEFfRElSUz0vdXNyL2xvY2FsL3NoYXJlOi91c3Ivc2hhcmUKZXhwb3J0IFhER19DVVJSRU5UX0RFU0tUT1A9WEZDRQpleHBvcnQgWERHX1NFU1NJT05fREVTS1RPUD14ZmNlCmV4cG9ydCBYREdfU0VTU0lPTl9UWVBFPXgxMQpleGVjIHN0YXJ0eGZjZTQK
-      # base64 dari polkit .pkla content
-      PKLA_B64: W0FsbG93IFJEUCBjb2xvcmRdCklkZW50aXR5PXVuaXgtZ3JvdXA6c3VkbwpBY3Rpb249b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIuY3JlYXRlLWRldmljZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5jcmVhdGUtcHJvZmlsZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5kZWxldGUtZGV2aWNlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLmRlbGV0ZS1wcm9maWxlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLm1vZGlmeS1kZXZpY2U7b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIubW9kaWZ5LXByb2ZpbGUKUmVzdWx0QW55PW5vClJlc3VsdEluYWN0aXZlPW5vClJlc3VsdEFjdGl2ZT15ZXMK
 
     steps:
       - name: Set hostname + runtime
         run: |
           N="${{ inputs.rdp_count }}"
-          [[ "$N" -gt 1 ]] 2>/dev/null && HN="bullet${{ matrix.id }}" || HN="bullet"
+
+          if [[ "$N" -gt 1 ]]; then
+            HN="bullet${{ matrix.id }}"
+          else
+            HN="bullet"
+          fi
+
           echo "TS_HOSTNAME=$HN" >> "$GITHUB_ENV"
+
           RT="${{ inputs.runtime_minutes }}"
-          [[ "${{ inputs.quick_test }}" == "true" ]] && RT=5
-          [[ ! "$RT" =~ ^[0-9]+$ ]] && RT=355
-          [[ "$RT" -lt 6 ]]         && RT=355
-          [[ "$RT" -gt 355 ]]       && RT=355
+
+          if [[ "${{ inputs.quick_test }}" == "true" ]]; then
+            RT=5
+          fi
+
+          [[ "$RT" =~ ^[0-9]+$ ]] || RT=355
+          [[ "$RT" -lt 5 ]] && RT=5
+          [[ "$RT" -gt 355 ]] && RT=355
+
           echo "RUNTIME_MINUTES=$RT" >> "$GITHUB_ENV"
-          echo "Hostname: $HN | Runtime: $RT min"
+
+          echo "Hostname: $HN"
+          echo "Runtime: $RT minutes"
 
       - name: Install dependencies
         run: |
           sudo apt-get update -y
+
           sudo apt-get install -y \
             xrdp \
             xfce4 \
@@ -102,110 +130,274 @@ jobs:
             xfce4-session \
             xfce4-goodies \
             xfconf \
+            dbus \
             dbus-x11 \
             ufw \
             curl \
             wget \
             python3
 
-      - name: Configure xrdp + xfce4
+      - name: Configure XFCE for XRDP
         run: |
-          # Decode base64 -> tulis file tanpa heredoc / indentation issue
-          echo "$STARTWM_B64" | base64 -d | sudo tee /etc/xrdp/startwm.sh > /dev/null
+          sudo systemctl stop xrdp 2>/dev/null || true
+          sudo systemctl stop xrdp-sesman 2>/dev/null || true
+
+          sudo mkdir -p /etc/xrdp
+
+          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
+          #!/bin/sh
+
+          export LANG=C.UTF-8
+          export LANGUAGE=C.UTF-8
+          export LC_ALL=C.UTF-8
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+
+          export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg"
+          export XDG_DATA_DIRS="/usr/local/share:/usr/share"
+
+          if [ -r /etc/profile ]; then
+              . /etc/profile
+          fi
+
+          if [ -r "$HOME/.profile" ]; then
+              . "$HOME/.profile"
+          fi
+
+          exec dbus-run-session -- startxfce4
+          EOF
+
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          echo "--- startwm.sh content (verify no leading spaces) ---"
-          cat -A /etc/xrdp/startwm.sh
-          echo "------------------------------------------------------"
+          echo "===== /etc/xrdp/startwm.sh ====="
+          sudo cat /etc/xrdp/startwm.sh
+          echo "================================"
 
-          # Allowed users
-          echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config > /dev/null
+          sudo tee /etc/X11/Xwrapper.config > /dev/null <<'EOF'
+          allowed_users=anybody
+          needs_root_rights=yes
+          EOF
 
-          # Polkit fix via base64 decode
-          sudo mkdir -p /etc/polkit-1/localauthority/50-local.d/
-          echo "$PKLA_B64" | base64 -d | sudo tee /etc/polkit-1/localauthority/50-local.d/xrdp-allow.pkla > /dev/null
+          sudo mkdir -p /etc/xrdp
 
           sudo systemctl enable xrdp
-          sudo systemctl restart xrdp
+          sudo systemctl enable xrdp-sesman
+
+          sudo systemctl start xrdp
+
           sleep 3
-          sudo systemctl is-active xrdp \
-            && echo "xrdp: running OK" \
-            || { echo "ERROR: xrdp failed"; sudo journalctl -u xrdp --no-pager -n 30; exit 1; }
+
+          if sudo systemctl is-active --quiet xrdp; then
+            echo "xrdp: running"
+          else
+            echo "ERROR: xrdp failed"
+            sudo systemctl status xrdp --no-pager || true
+            sudo journalctl -u xrdp --no-pager -n 50 || true
+            exit 1
+          fi
 
       - name: Create RDP user
         run: |
           U="$RDP_USER"
           P="$RDP_PASS"
-          if ! id "$U" &>/dev/null; then
-            sudo useradd -m -s /bin/bash "$U"
+
+          if ! id "$U" >/dev/null 2>&1; then
+            sudo useradd \
+              --create-home \
+              --shell /bin/bash \
+              "$U"
           fi
+
           echo "$U:$P" | sudo chpasswd
-          sudo usermod -aG sudo,xrdp "$U"
 
-          # .xsession: sama dengan startwm.sh, decode base64
-          echo "$STARTWM_B64" | base64 -d | sudo tee /home/$U/.xsession > /dev/null
-          sudo chmod +x /home/$U/.xsession
-          sudo chown $U:$U /home/$U/.xsession
+          sudo usermod -aG sudo "$U"
 
-          echo "RDP user: $U | pass: $P"
+          HOME_DIR="$(getent passwd "$U" | cut -d: -f6)"
+
+          sudo tee "$HOME_DIR/.xsession" > /dev/null <<'EOF'
+          #!/bin/sh
+
+          export LANG=C.UTF-8
+          export LANGUAGE=C.UTF-8
+          export LC_ALL=C.UTF-8
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+
+          export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg"
+          export XDG_DATA_DIRS="/usr/local/share:/usr/share"
+
+          if [ -r "$HOME/.profile" ]; then
+              . "$HOME/.profile"
+          fi
+
+          exec dbus-run-session -- startxfce4
+          EOF
+
+          sudo chmod +x "$HOME_DIR/.xsession"
+          sudo chown "$U:$U" "$HOME_DIR/.xsession"
+
+          echo "RDP user configured: $U"
+
+      - name: Configure XRDP session
+        run: |
+          sudo tee /etc/xrdp/xrdp.ini >/dev/null <<'EOF'
+          [Globals]
+          ini_version=1
+
+          [Logging]
+          LogFile=xrdp.log
+          LogLevel=INFO
+          EnableSyslog=true
+          SyslogLevel=INFO
+
+          [Channels]
+          rdpdr=true
+          rdpsnd=true
+          drdynvc=true
+          cliprdr=true
+
+          [Xorg]
+          name=Xorg
+          lib=libxup.so
+          username=ask
+          password=ask
+          port=-1
+          code=20
+          EOF
+
+          sudo systemctl restart xrdp
+
+          sleep 3
+
+          sudo systemctl is-active --quiet xrdp
+
+          echo "XRDP restarted successfully."
 
       - name: Open RDP port
         run: |
           sudo ufw allow 3389/tcp || true
-          echo "Port 3389 opened."
+          echo "RDP port 3389 configured."
 
       - name: Purge old Tailscale devices
         if: ${{ needs.setup.outputs.multi == '0' && inputs.do_purge == 'true' }}
         run: |
-          AUTH=$(echo -n "${{ inputs.ts_api_key }}:" | base64 -w0)
-          TN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${{ inputs.ts_tailnet }}")
-          DEVICES=$(curl -sf -H "Authorization: Basic $AUTH" \
+          AUTH=$(printf '%s:' "${{ inputs.ts_api_key }}" | base64 -w0)
+
+          TN=$(python3 -c '
+          import urllib.parse
+          import sys
+          print(urllib.parse.quote(sys.argv[1], safe=""))
+          ' "${{ inputs.ts_tailnet }}")
+
+          DEVICES=$(curl -fsS \
+            -H "Authorization: Basic $AUTH" \
             "https://api.tailscale.com/api/v2/tailnet/$TN/devices") || {
-            echo "Warning: gagal fetch devices. Skip purge."; exit 0
+              echo "Warning: failed to retrieve Tailscale devices."
+              exit 0
           }
-          python3 << PYEOF
-          import json, urllib.request
-          auth = "$AUTH"
-          data = json.loads("""$DEVICES""")
-          for d in data.get("devices", []):
-              if d.get("hostname", "").startswith("bullet"):
-                  req = urllib.request.Request(
-                      f"https://api.tailscale.com/api/v2/device/{d['id']}",
-                      method="DELETE",
-                      headers={"Authorization": f"Basic {auth}"}
-                  )
-                  try:
-                      urllib.request.urlopen(req)
-                      print(f"Deleted: {d['hostname']}")
-                  except Exception as e:
-                      print(f"Warn: {e}")
-          PYEOF
-          echo "Purge selesai."
+
+          export DEVICES_JSON="$DEVICES"
+          export TS_AUTH="$AUTH"
+
+          python3 <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          auth = os.environ["TS_AUTH"]
+          data = json.loads(os.environ["DEVICES_JSON"])
+
+          for device in data.get("devices", []):
+              hostname = device.get("hostname", "")
+
+              if not hostname.startswith("bullet"):
+                  continue
+
+              device_id = device.get("id")
+
+              if not device_id:
+                  continue
+
+              url = f"https://api.tailscale.com/api/v2/device/{device_id}"
+
+              request = urllib.request.Request(
+                  url,
+                  method="DELETE",
+                  headers={
+                      "Authorization": f"Basic {auth}"
+                  }
+              )
+
+              try:
+                  with urllib.request.urlopen(request, timeout=20):
+                      print(f"Deleted: {hostname}")
+              except Exception as exc:
+                  print(f"Warning: could not delete {hostname}: {exc}")
+          PY
+
+          echo "Tailscale purge complete."
 
       - name: Install + connect Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sudo sh
+
           sudo tailscale logout 2>/dev/null || true
+
           sudo tailscale up \
             --authkey="${{ inputs.ts_authkey }}" \
             --hostname="$TS_HOSTNAME" \
             --accept-dns=true \
-            --accept-routes=true \
-            --ssh
-          IP4=$(sudo tailscale ip -4 2>/dev/null | head -1)
+            --accept-routes=true
+
+          IP4="$(sudo tailscale ip -4 2>/dev/null | head -n1)"
+
+          if [[ -z "$IP4" ]]; then
+            echo "ERROR: Tailscale IPv4 address not found."
+            sudo tailscale status || true
+            exit 1
+          fi
+
           echo "TAILSCALE_IP=$IP4" >> "$GITHUB_ENV"
-          echo "══════════════════════════════════════"
-          echo "  RDP  : $IP4:3389"
-          echo "  USER : $RDP_USER"
-          echo "  PASS : $RDP_PASS"
-          echo "══════════════════════════════════════"
+
+          echo
+          echo "======================================"
+          echo " RDP : $IP4:3389"
+          echo " USER: $RDP_USER"
+          echo "======================================"
+          echo
+
+      - name: Verify services
+        run: |
+          echo "===== XRDP ====="
+          sudo systemctl is-active xrdp
+          sudo systemctl status xrdp --no-pager -n 10 || true
+
+          echo
+          echo "===== XFCE ====="
+          command -v startxfce4
+          command -v xfce4-session
+          command -v xfconfd
+          command -v dbus-run-session
+
+          echo
+          echo "===== DISPLAY ====="
+          echo "DISPLAY=$DISPLAY"
+
+          echo
+          echo "===== TAILSCALE ====="
+          sudo tailscale status
 
       - name: Keep alive
         run: |
           END=$((SECONDS + RUNTIME_MINUTES * 60))
-          while [ $SECONDS -lt $END ]; do
+
+          while [ "$SECONDS" -lt "$END" ]; do
             REMAIN=$(( (END - SECONDS) / 60 ))
-            echo "[RDP] $(date +%H:%M:%S) | sisa: ${REMAIN} menit | ${TAILSCALE_IP}:3389"
+
+            echo "[RDP] $(date '+%H:%M:%S') | remaining: ${REMAIN}m | ${TAILSCALE_IP}:3389"
+
             sleep 60
           done
 
@@ -215,27 +407,53 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           CYCLES="${{ inputs.cycles }}"
-          [[ ! "$CYCLES" =~ ^[0-9]+$ ]] && CYCLES=0
-          if [[ "$CYCLES" -gt 0 ]]; then
-            NEXT=$((CYCLES - 1))
-            REPO="${{ github.repository }}"
-            REF="${{ github.ref_name }}"
-            if [[ "$NEXT" -le 0 ]]; then
-              curl -sf -X POST \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                -d "{\"ref\":\"$REF\",\"inputs\":{\"ts_tailnet\":\"${{ inputs.ts_tailnet }}\",\"ts_api_key\":\"${{ inputs.ts_api_key }}\",\"base_prefix\":\"bullet\",\"max_count\":\"10\",\"dry_run\":\"false\"}}" \
-                "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-stop.yml/dispatches"
-              echo "Dispatched STOP."
-            else
-              PAYLOAD=$(python3 -c "import json; print(json.dumps({'ts_authkey':'${{ inputs.ts_authkey }}','ts_api_key':'${{ inputs.ts_api_key }}','ts_tailnet':'${{ inputs.ts_tailnet }}','do_purge':'${{ inputs.do_purge }}','quick_test':'${{ inputs.quick_test }}','runtime_minutes':'${{ inputs.runtime_minutes }}','rdp_count':'${{ inputs.rdp_count }}','cycles':str($NEXT)}))")
-              curl -sf -X POST \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                -d "{\"ref\":\"$REF\",\"inputs\":$PAYLOAD}" \
-                "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-ubuntu-clean.yml/dispatches"
-              echo "Dispatched next, cycles=$NEXT"
-            fi
-          else
-            echo "cycles=0, session selesai."
+
+          [[ "$CYCLES" =~ ^[0-9]+$ ]] || CYCLES=0
+
+          if [[ "$CYCLES" -le 0 ]]; then
+            echo "cycles=0, session finished."
+            exit 0
           fi
+
+          NEXT=$((CYCLES - 1))
+          REPO="${{ github.repository }}"
+          REF="${{ github.ref_name }}"
+
+          if [[ "$NEXT" -le 0 ]]; then
+            echo "Final cycle reached."
+
+            curl -fsS -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -d "{\"ref\":\"$REF\",\"inputs\":{\"ts_tailnet\":\"${{ inputs.ts_tailnet }}\",\"ts_api_key\":\"${{ inputs.ts_api_key }}\",\"base_prefix\":\"bullet\",\"max_count\":\"10\",\"dry_run\":\"false\"}}" \
+              "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-stop.yml/dispatches"
+
+            echo "Dispatched STOP workflow."
+            exit 0
+          fi
+
+          PAYLOAD=$(python3 - <<PY
+          import json
+
+          payload = {
+              "ts_authkey": "${{ inputs.ts_authkey }}",
+              "ts_api_key": "${{ inputs.ts_api_key }}",
+              "ts_tailnet": "${{ inputs.ts_tailnet }}",
+              "do_purge": "${{ inputs.do_purge }}",
+              "quick_test": "${{ inputs.quick_test }}",
+              "runtime_minutes": "${{ inputs.runtime_minutes }}",
+              "rdp_count": "${{ inputs.rdp_count }}",
+              "cycles": str($NEXT)
+          }
+
+          print(json.dumps(payload))
+          PY
+          )
+
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"ref\":\"$REF\",\"inputs\":$PAYLOAD}" \
+            "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-ubuntu-clean.yml/dispatches"
+
+          echo "Dispatched next cycle: $NEXT"
