@@ -1,131 +1,281 @@
-name: ubunturdp
+name: RDP + Tailscale (Ubuntu)
 
 on:
   workflow_dispatch:
     inputs:
-      auth:
-        description: 'GRDP Authorization Code'
+      ts_authkey:
+        description: "Tailscale Auth key (tskey-auth-...)"
         required: true
-        default: 'paste your code here'
+      ts_api_key:
+        description: "Tailscale API key (untuk purge device lama)"
+        required: true
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+      do_purge:
+        description: "Purge device bullet* lama di Tailscale sebelum mulai"
+        required: false
+        default: "true"
+      quick_test:
+        description: "Mode test 5 menit"
+        type: boolean
+        default: false
+      runtime_minutes:
+        description: "Durasi session (maks 355)"
+        required: false
+        default: "355"
+      rdp_count:
+        description: "Jumlah instance RDP (1-10)"
+        required: false
+        default: "1"
+      cycles:
+        description: "0=stop setelah run ini; N=jumlah handoff tersisa"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+  actions: write
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  # ─── Job 1: Hitung matrix ───────────────────────────────────────────────────
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      multi:  ${{ steps.mk.outputs.multi }}
     steps:
-    - name: Creating User to Login
-      run: |
-         sudo useradd -m ash && sudo adduser ash sudo && echo 'ash:ash' | sudo chpasswd
+      - id: mk
+        run: |
+          N=${{ inputs.rdp_count }}
+          [[ "$N" -lt 1 ]] 2>/dev/null && N=1
+          [[ "$N" -gt 10 ]] 2>/dev/null && N=10
 
-    - name: Installing Desktop Environment (wait for 10 min)
-      run: |
-        sudo apt update -y
-        sudo apt install -y expect ubuntu-desktop xfce4-terminal
+          INCLUDE="["
+          for i in $(seq 1 $N); do
+            [[ $i -gt 1 ]] && INCLUDE="${INCLUDE},"
+            INCLUDE="${INCLUDE}{\"id\":$i}"
+          done
+          INCLUDE="${INCLUDE}]"
 
-    - name: Installing Chrome Remote Desktop and other tools
-      run: |
-            # Create a user for Chrome Remote Desktop
-            sudo useradd -m Ubuntu
-            sudo adduser Ubuntu sudo
-            echo 'Ubuntu:1234' | sudo chpasswd
-            sudo sed -i 's/.*:\/bin\/sh/&\/bin\/bash/' /etc/passwd
+          echo "matrix={\"include\":${INCLUDE}}" >> "$GITHUB_OUTPUT"
+          [[ "$N" -gt 1 ]] && echo "multi=1" >> "$GITHUB_OUTPUT" \
+                            || echo "multi=0" >> "$GITHUB_OUTPUT"
 
-            # Install Chrome Remote Desktop dependencies
-            sudo apt update -y
-            sudo apt install -y python3-psutil xbase-clients xserver-xorg-video-dummy
+  # ─── Job 2: Setup RDP per instance ──────────────────────────────────────────
+  rdp:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      max-parallel: 10
+    timeout-minutes: 370
+    env:
+      RDP_USER: bulletuser
+      RDP_PASS: Bullet@12345
+      DEBIAN_FRONTEND: noninteractive
 
-            # Install Chrome Remote Desktop
-            wget https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-            sudo dpkg --install chrome-remote-desktop_current_amd64.deb
-            sudo apt --assume-yes --fix-broken install
+    steps:
+      # ── 1. Tentukan hostname + runtime ────────────────────────────────────────
+      - name: Set hostname + runtime
+        run: |
+          N="${{ inputs.rdp_count }}"
+          [[ "$N" -gt 1 ]] 2>/dev/null \
+            && HN="bullet${{ matrix.id }}" \
+            || HN="bullet"
+          echo "TS_HOSTNAME=$HN" >> "$GITHUB_ENV"
 
-            # Configure Chrome Remote Desktop session
-            sudo bash -c 'echo "exec /etc/X11/Xsession /usr/bin/xfce4-session" > /etc/chrome-remote-desktop-session'
-            sudo apt install --assume-yes xscreensaver
+          RT="${{ inputs.runtime_minutes }}"
+          [[ "${{ inputs.quick_test }}" == "true" ]] && RT=5
+          [[ ! "$RT" =~ ^[0-9]+$ ]]  && RT=355
+          [[ "$RT" -lt 6 ]]           && RT=355
+          [[ "$RT" -gt 355 ]]         && RT=355
+          echo "RUNTIME_MINUTES=$RT" >> "$GITHUB_ENV"
+          echo "Hostname: $HN | Runtime: $RT min"
 
-            # Disable display manager if it interferes
-            sudo systemctl disable lightdm.service || true
+      # ── 2. Install semua package sekaligus ────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            xrdp \
+            xfce4 \
+            xfce4-terminal \
+            xfce4-goodies \
+            dbus-x11 \
+            ufw \
+            curl \
+            wget \
+            python3
 
-            # Install Google Chrome
-            wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-            sudo dpkg --install google-chrome-stable_current_amd64.deb
-            sudo apt --assume-yes --fix-broken install
-            sudo apt update && sudo apt -f install
+      # ── 3. Konfigurasi xrdp + xfce4 (proven pattern) ─────────────────────────
+      - name: Configure xrdp + xfce4
+        run: |
+          # startwm.sh: comment out 2 baris default, append startxfce4
+          sudo sed -i 's|^test -x /etc/X11/Xsession.*|#&|' /etc/xrdp/startwm.sh
+          sudo sed -i 's|^exec /bin/sh /etc/X11/Xsession.*|#&|' /etc/xrdp/startwm.sh
+          grep -q 'startxfce4' /etc/xrdp/startwm.sh \
+            || echo 'startxfce4' | sudo tee -a /etc/xrdp/startwm.sh > /dev/null
 
-            # Install Python and necessary libraries
-            sudo apt install -y python3-pip xvfb
-            pip3 install nbformat gdown pika
+          # Allowed users: anybody (bukan hanya console)
+          echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config > /dev/null
 
-            # Install essential utilities
-            sudo apt install -y nautilus nano
+          # Polkit fix — tanpa ini session langsung disconnect di beberapa env
+          sudo mkdir -p /etc/polkit-1/localauthority/50-local.d/
+          sudo tee /etc/polkit-1/localauthority/50-local.d/xrdp-allow.pkla > /dev/null << 'PKLA'
+          [Allow RDP users colord]
+          Identity=unix-group:sudo
+          Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.create-profile;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.delete-profile;org.freedesktop.color-manager.modify-device;org.freedesktop.color-manager.modify-profile
+          ResultAny=no
+          ResultInactive=no
+          ResultActive=yes
+          PKLA
 
-            # Install Visual Studio Code
-            wget -O code.deb https://code.visualstudio.com/sha/download\?build\=stable\&os\=linux-deb-x64
-            sudo dpkg --install code.deb
-            sudo apt --assume-yes --fix-broken install
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          sleep 3
+          sudo systemctl is-active xrdp \
+            && echo "xrdp: running" \
+            || { echo "ERROR: xrdp failed to start"; sudo journalctl -u xrdp --no-pager -n 30; exit 1; }
 
-            # Install Node Version Manager (nvm) and Node.js
-            wget -O- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            nvm install --lts # Installs the latest LTS version of Node.js
-            nvm use --lts
+      # ── 4. Buat user RDP ──────────────────────────────────────────────────────
+      - name: Create RDP user
+        run: |
+          U="$RDP_USER"
+          P="$RDP_PASS"
 
-            # Add the Ubuntu user to the chrome-remote-desktop group
-            sudo adduser Ubuntu chrome-remote-desktop
+          if ! id "$U" &>/dev/null; then
+            sudo useradd -m -s /bin/bash "$U"
+          fi
+          echo "$U:$P" | sudo chpasswd
+          sudo usermod -aG sudo,xrdp "$U"
 
-    - name: Generate GRDP setup script
-      run: |
-           echo "${{ github.event.inputs.auth }}" > setup.sh
-           chmod 777 setup.sh
+          # .xsession untuk user ini
+          echo 'startxfce4' | sudo tee /home/$U/.xsession > /dev/null
+          sudo chown $U:$U /home/$U/.xsession
 
-    - name: Initialize GRDP with PIN
-      run: |
-           expect -c '
-           spawn ./setup.sh
-           expect "Enter a PIN of at least six digits: "
-           send "123456\r"
-           expect "Enter the same PIN again: "
-           send "123456\r"
-           expect eof
-           '
+          echo "RDP user: $U | pass: $P"
 
-    - name: SSH tunnel over ngrok
-      uses: joshlarsen/ssh-tunnel-action@v1.2
-      with:
-        # You might need to set your ngrok authtoken as a GitHub secret
-        # For example, set a secret named NGROK_AUTHTOKEN in your repository settings
-        # and reference it here:
-        # ngrok_authtoken: ${{ secrets.NGROK_AUTHTOKEN }}
-        # If you don't provide an authtoken, ngrok will use anonymous mode (limited)
-        # ngrok_authtoken: "" # Uncomment and set your token if you have one
-        remote_port: 22 # Assuming SSH is on port 22 on the runner
-        # You can specify a subdomain for your ngrok tunnel if you have a paid ngrok account
-        # subdomain: "my-custom-subdomain"
+      # ── 5. Buka port RDP via ufw ──────────────────────────────────────────────
+      - name: Open RDP port
+        run: |
+          sudo ufw allow 3389/tcp || true
+          echo "Port 3389 opened."
 
-    - name: Initialize GRDP with PIN
-      run: |
-           expect -c '
-           spawn ./setup.sh
-           expect "Enter a PIN of at least six digits: "
-           send "123456\r"
-           expect "Enter the same PIN again: "
-           send "123456\r"
-           expect eof
-           '
+      # ── 6. Purge device bullet* lama (single-instance saja) ───────────────────
+      - name: Purge old Tailscale devices
+        if: ${{ needs.setup.outputs.multi == '0' && inputs.do_purge == 'true' }}
+        run: |
+          AUTH=$(echo -n "${{ inputs.ts_api_key }}:" | base64 -w0)
+          TN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
+               "${{ inputs.ts_tailnet }}")
 
-    - name: SSH tunnel over ngrok
-      uses: joshlarsen/ssh-tunnel-action@v1.2
-      with:
-        # You might need to set your ngrok authtoken as a GitHub secret
-        # For example, set a secret named NGROK_AUTHTOKEN in your repository settings
-        # and reference it here:
-        # ngrok_authtoken: ${{ secrets.NGROK_AUTHTOKEN }}
-        # If you don't provide an authtoken, ngrok will use anonymous mode (limited)
-        # ngrok_authtoken: "" # Uncomment and set your token if you have one
-        remote_port: 22 # Assuming SSH is on port 22 on the runner
-        # You can specify a subdomain for your ngrok tunnel if you have a paid ngrok account
-        # subdomain: "my-custom-subdomain"
+          DEVICES=$(curl -sf \
+            -H "Authorization: Basic $AUTH" \
+            "https://api.tailscale.com/api/v2/tailnet/$TN/devices") || {
+            echo "Warning: gagal fetch device list. Skip purge."; exit 0
+          }
+
+          echo "$DEVICES" | python3 - << 'PY'
+          import sys, json, urllib.request
+          data = json.load(sys.stdin)
+          auth = "$AUTH"
+          for d in data.get("devices", []):
+              if d.get("hostname", "").startswith("bullet"):
+                  req = urllib.request.Request(
+                      f"https://api.tailscale.com/api/v2/device/{d['id']}",
+                      method="DELETE",
+                      headers={"Authorization": f"Basic {auth}"}
+                  )
+                  try:
+                      urllib.request.urlopen(req)
+                      print(f"Deleted: {d['hostname']}")
+                  except Exception as e:
+                      print(f"Warn: {e}")
+          PY
+          echo "Purge selesai."
+
+      # ── 7. Install + connect Tailscale ────────────────────────────────────────
+      - name: Install + connect Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+
+          sudo tailscale logout 2>/dev/null || true
+          sudo tailscale up \
+            --authkey="${{ inputs.ts_authkey }}" \
+            --hostname="$TS_HOSTNAME" \
+            --accept-dns=true \
+            --accept-routes=true \
+            --ssh
+
+          IP4=$(sudo tailscale ip -4 2>/dev/null | head -1)
+          echo "TAILSCALE_IP=$IP4" >> "$GITHUB_ENV"
+          echo "Tailscale IP: $IP4"
+          echo "────────────────────────────────────────────────"
+          echo "  RDP TARGET  : $IP4:3389"
+          echo "  USER        : $RDP_USER"
+          echo "  PASS        : $RDP_PASS"
+          echo "  HOSTNAME    : $TS_HOSTNAME"
+          echo "────────────────────────────────────────────────"
+
+      # ── 8. Keep alive ─────────────────────────────────────────────────────────
+      - name: Keep alive
+        run: |
+          END=$((SECONDS + RUNTIME_MINUTES * 60))
+          while [ $SECONDS -lt $END ]; do
+            REMAIN=$(( (END - SECONDS) / 60 ))
+            echo "[RDP] $(date +%H:%M:%S) | sisa: ${REMAIN} menit | IP: ${TAILSCALE_IP} | host: ${TS_HOSTNAME}"
+            sleep 60
+          done
+
+      # ── 9. Dispatch next cycle atau stop ──────────────────────────────────────
+      - name: Dispatch next or stop
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CYCLES="${{ inputs.cycles }}"
+          [[ ! "$CYCLES" =~ ^[0-9]+$ ]] && CYCLES=0
+
+          if [[ "$CYCLES" -gt 0 ]]; then
+            NEXT=$((CYCLES - 1))
+            REPO="${{ github.repository }}"
+            REF="${{ github.ref_name }}"
+            HDR_AUTH="Authorization: Bearer $GH_TOKEN"
+            HDR_ACCEPT="Accept: application/vnd.github+json"
+
+            if [[ "$NEXT" -le 0 ]]; then
+              # Trigger stop workflow
+              curl -sf -X POST \
+                -H "$HDR_AUTH" -H "$HDR_ACCEPT" \
+                -d "{\"ref\":\"$REF\",\"inputs\":{\"ts_tailnet\":\"${{ inputs.ts_tailnet }}\",\"ts_api_key\":\"${{ inputs.ts_api_key }}\",\"base_prefix\":\"bullet\",\"max_count\":\"10\",\"dry_run\":\"false\"}}" \
+                "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-stop.yml/dispatches"
+              echo "Dispatched STOP."
+            else
+              # Handoff ke run berikutnya
+              PAYLOAD=$(python3 -c "
+          import json
+          print(json.dumps({
+            'ts_authkey':      '${{ inputs.ts_authkey }}',
+            'ts_api_key':      '${{ inputs.ts_api_key }}',
+            'ts_tailnet':      '${{ inputs.ts_tailnet }}',
+            'do_purge':        '${{ inputs.do_purge }}',
+            'quick_test':      '${{ inputs.quick_test }}',
+            'runtime_minutes': '${{ inputs.runtime_minutes }}',
+            'rdp_count':       '${{ inputs.rdp_count }}',
+            'cycles':          str($NEXT)
+          }))
+          ")
+              curl -sf -X POST \
+                -H "$HDR_AUTH" -H "$HDR_ACCEPT" \
+                -d "{\"ref\":\"$REF\",\"inputs\":$PAYLOAD}" \
+                "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-ubuntu-clean.yml/dispatches"
+              echo "Dispatched next run, cycles=$NEXT"
+            fi
+          else
+            echo "cycles=0, session selesai."
+          fi
