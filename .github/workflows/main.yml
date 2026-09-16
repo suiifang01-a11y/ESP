@@ -1,175 +1,46 @@
-name: RDP + Tailscale + Ubuntu XFCE
+#!/bin/bash
 
-on:
-  workflow_dispatch:
-    inputs:
-      ts_tailnet:         
-        description: "Tailscale tailnet (e.g. you@gmail.com)"
-        required: true
-      ts_api_key:         
-        description: "Tailscale API key (device admin, no Bearer)"
-        required: true
-      ts_authkey:         
-        description: "Tailscale Auth key (reusable or ephemeral)"
-        required: true
-      runtime_minutes:    
-        description: "Runtime (max 360; default 355 when not test)"
-        required: false
-        default: "355"
+# === STEP 0: Update System ===
+echo "[*] Updating system..."
+sudo apt-get update && sudo apt-get upgrade -y
 
-permissions:
-  contents: read
-  actions: write
+# === STEP 1: Install XFCE Desktop Environment ===
+echo "[*] Installing XFCE4 desktop environment..."
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-session
 
-defaults:
-  run:
-    shell: bash
+# === STEP 2: Install XRDP and dependencies ===
+echo "[*] Installing XRDP and Xorg backend..."
+sudo apt-get install -y xrdp xorgxrdp
+sudo systemctl enable xrdp
 
-jobs:
-  # Kita hilangkan job setup terpisah dan matrix rumit jika hanya butuh 1 instance.
-  # Jika kamu butuh multi-instance, kita bisa gunakan strategy langsung di job utama.
-  # Untuk stabilitas, kita gunakan single job tanpa matrix kompleks dulu.
-  
-  rdp:
-    runs-on: ubuntu-latest
-    timeout-minutes: 370
-    steps:
-      - name: Install Tailscale
-        run: |
-          # Script resmi Tailscale menangani repo dengan benar untuk Ubuntu 22.04/24.04
-          curl -fsSL https://tailscale.com/install.sh | sh -s -- --version stable
-          
-          # Logout sesi lama jika ada
-          tailscale logout
-          
-          # Connect ke Tailnet
-          tailscale up --authkey "${{ inputs.ts_authkey }}" --hostname "ubuntu-gh-${{ github.run_id }}" --accept-dns=true --accept-routes=true
-          
-          # Ambil IPv4 untuk akses RDP nanti
-          ip4=$(tailscale ip -4 | head -n 1)
-          echo "TAILSCALE_IP=$ip4" >> $GITHUB_ENV
-          echo "::notice::Tailscale IPv4: $ip4"
+# === STEP 3: Add xrdp user to ssl-cert group ===
+echo "[*] Adding xrdp to ssl-cert group..."
+sudo adduser xrdp ssl-cert
 
-      - name: Install XFCE and GUI tools
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
-            xfce4-terminal \
-            xvfb \
-            dbus-x11 \
-            xrdp \
-            firefox-esr \
-            ttf-mscorefonts-installer
+# === STEP 4: Configure xrdp to use XFCE ===
+echo "[*] Configuring XRDP to use XFCE4..."
+echo "startxfce4" > ~/.xsession
 
-      - name: Configure XRDP for XFCE
-        run: |
-          # Set default session ke XFCE
-          echo "xfce4-session" | sudo tee /etc/xrdp/sesman/startwm.sh
-          
-          # Fix permission issue pada Ubuntu 22.04/24.04 untuk XRDP
-          sudo cp /etc/ssl/private/ssl-cert-snakeoil.key /etc/xrdp/
-          sudo chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key
-          sudo chgrp ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key
-          
-          # Restart XRDP
-          sudo systemctl daemon-reload
-          sudo systemctl enable xrdp
-          sudo systemctl start xrdp
+# Patch /etc/xrdp/startwm.sh to avoid blank screen
+echo "[*] Patching /etc/xrdp/startwm.sh to launch XFCE..."
+sudo sed -i.bak '/fi/a startxfce4' /etc/xrdp/startwm.sh
 
-      - name: Start Virtual Display and XFCE
-        run: |
-          # Start Xvfb
-          Xvfb :99 \
-            -screen 0 1920x1080x24 \
-            -ac \
-            +extension GLX \
-            +render \
-            -noreset &
-          
-          # Tunggu Xvfb siap
-          sleep 3
-          
-          # Start XFCE session
-          export DISPLAY=:99
-          dbus-launch --exit-with-session startxfce4 &
-          
-          # Tunggu XFCE load penuh
-          sleep 10
+# === STEP 5: Restart XRDP service ===
+echo "[*] Restarting XRDP..."
+sudo systemctl restart xrdp
 
-      - name: Verify Services
-        run: |
-          echo "Checking XRDP..."
-          sudo ss -tlnp | grep 3389 || echo "XRDP not listening on 3389"
-          
-          echo "Checking Xvfb..."
-          pgrep -a Xvfb || echo "Xvfb not running"
-          
-          echo "Checking XFCE..."
-          pgrep -a xfce4 || echo "XFCE not running"
-          
-          echo "Tailscale IP: $TAILSCALE_IP"
+# === STEP 6: Set password for current user ===
+echo "[*] Setting password for user: $USER"
+sudo passwd $USER
 
-      - name: Keep alive
-        run: |
-          mins=${{ inputs.runtime_minutes }}
-          end=$(date -d "+$mins minutes" +%s)
-          while [ $(date +%s) -lt $end ]; do
-            echo "Heartbeat $(date -u '+%H:%M:%S')"
-            sleep 60
-          done
-      - name: Configure XRDP
-        run: |
-          # Pastikan XRDP menggunakan XFCE sebagai default session
-          echo "xfce4-session" | sudo tee /etc/xrdp/sesman/startwm.sh
-          
-          # Fix issue dengan XRDP pada Ubuntu 22.04/24.04 terkait certificate
-          sudo cp /etc/ssl/private/ssl-cert-snakeoil.key /etc/xrdp/
-          sudo chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key
-          sudo chgrp ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key
-          
-          # Restart XRDP
-          sudo systemctl daemon-reload
-          sudo systemctl enable xrdp
-          sudo systemctl start xrdp
+# === STEP 7: Open port 3389 for RDP ===
+echo "[*] Allowing RDP through firewall (TCP 3389)..."
+sudo ufw allow 3389/tcp
+sudo ufw reload
 
-      - name: Start virtual display and XFCE
-        run: |
-          # Start Xvfb
-          Xvfb :99 \
-            -screen 0 1920x1080x24 \
-            -ac \
-            +extension GLX \
-            +render \
-            -noreset &
-          
-          # Wait for Xvfb to be ready
-          sleep 3
-          
-          # Start XFCE session
-          export DISPLAY=:99
-          dbus-launch --exit-with-session startxfce4 &
-          
-          # Wait for XFCE to fully load
-          sleep 10
-
-      - name: Verify RDP
-        run: |
-          echo "Checking if XRDP is listening..."
-          sudo netstat -tlnp | grep 3389 || sudo ss -tlnp | grep 3389
-          
-          echo "Checking if Xvfb is running..."
-          pgrep -a Xvfb
-          
-          echo "Checking if XFCE is running..."
-          pgrep -a xfce4
-
-      - name: Keep alive (to ${{ inputs.runtime_minutes }} mins)
-        run: |
-          mins=${{ inputs.runtime_minutes }}
-          end=$(date -d "+$mins minutes" +%s)
-          while [ $(date +%s) -lt $end ]; do
-            echo "Heartbeat $(date -u '+%H:%M:%S') ends at $(date -d "@$end" -u '+%H:%M:%S')"
-            sleep 60
-          done
+# === DONE ===
+echo "[✅] XRDP setup complete. You can now connect via RDP to your VM using:"
+echo "👉 IP or External DNS"
+echo "👉 Port: 3389"
+echo "👉 Username: $USER"
+echo "👉 Password: the one you just set"
