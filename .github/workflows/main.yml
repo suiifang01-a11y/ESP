@@ -1,30 +1,15 @@
-name: Generate AWG Config
+name: Generate AWG Configs
 
 on:
   workflow_dispatch:
     inputs:
-      endpoint:
-        description: "AWG Server Endpoint"
-        required: true
-        default: "103.235.72.131:16978"
-
-      server_public_key:
-        description: "Server PublicKey"
-        required: true
-        type: string
-
-      preshared_key:
-        description: "PresharedKey"
-        required: true
-        type: string
-
-      client_count:
+      jumlah:
         description: "Jumlah config"
         required: true
         default: "3"
         type: string
 
-      start_ip:
+      ip_awal:
         description: "IP awal client"
         required: true
         default: "10.66.66.61"
@@ -35,37 +20,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install AWG/WireGuard tools
+      - name: Install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y wireguard-tools zip
 
-      - name: Generate configs
+      - name: Generate AWG configs
         env:
-          ENDPOINT: ${{ inputs.endpoint }}
-          SERVER_PUBKEY: ${{ inputs.server_public_key }}
-          PSK: ${{ inputs.preshared_key }}
-          COUNT: ${{ inputs.client_count }}
-          START_IP: ${{ inputs.start_ip }}
+          JUMLAH: ${{ inputs.jumlah }}
+          IP_AWAL: ${{ inputs.ip_awal }}
+          ENDPOINT: "103.235.72.131:16978"
+          SERVER_PUBLIC_KEY: "692CvI8V+exhrfBzofx1innWxsDDRA2eHuDcT6GpLVE="
         run: |
           set -e
 
-          mkdir -p awg_configs
+          mkdir -p AWG_CONFIGS
 
-          echo "::add-mask::$SERVER_PUBKEY"
-          echo "::add-mask::$PSK"
+          IFS='.' read -r A B C D <<< "$IP_AWAL"
 
-          IFS=. read -r A B C D <<< "$START_IP"
+          for ((i=0; i<JUMLAH; i++)); do
 
-          for ((i=0; i<COUNT; i++)); do
             IP="$A.$B.$C.$((D+i))"
 
             PRIVATE_KEY=$(wg genkey)
-            PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
+            PUBLIC_KEY=$(printf '%s' "$PRIVATE_KEY" | wg pubkey)
+
+            PSK=$(wg genpsk)
 
             NAME="CLIENT_$((i+1))"
 
-            cat > "awg_configs/${NAME}.conf" <<EOF
+            cat > "AWG_CONFIGS/${NAME}.conf" <<EOF
           [Interface]
           PrivateKey = $PRIVATE_KEY
           Address = ${IP}/24
@@ -82,23 +66,26 @@ jobs:
           H4 = 3466609064
 
           [Peer]
-          PublicKey = $SERVER_PUBKEY
+          PublicKey = $SERVER_PUBLIC_KEY
           PresharedKey = $PSK
           Endpoint = $ENDPOINT
           AllowedIPs = 0.0.0.0/0, ::/0
           PersistentKeepalive = 25
           EOF
 
-            echo "=== $NAME ==="
-            echo "Address : $IP"
-            echo "PublicKey : $PUBLIC_KEY"
-            echo
+            echo "================================"
+            echo "$NAME"
+            echo "IP         : $IP"
+            echo "PublicKey  : $PUBLIC_KEY"
+            echo "================================"
+
           done
 
-          zip -r AWG_CONFIGS.zip awg_configs
+          zip -r AWG_CONFIGS.zip AWG_CONFIGS
 
-      - name: Upload configs
+      - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
           name: AWG_CONFIGS
           path: AWG_CONFIGS.zip
+          retention-days: 1
