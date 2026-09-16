@@ -1,74 +1,104 @@
-name: Ubuntu Tailscale SSH
+name: Generate AWG Config
 
 on:
   workflow_dispatch:
     inputs:
-      tailscale_auth_key:
-        description: "Tailscale Auth Key"
+      endpoint:
+        description: "AWG Server Endpoint"
+        required: true
+        default: "103.235.72.131:16978"
+
+      server_public_key:
+        description: "Server PublicKey"
         required: true
         type: string
 
-      ssh_public_key:
-        description: "SSH Public Key dari Termux"
+      preshared_key:
+        description: "PresharedKey"
         required: true
+        type: string
+
+      client_count:
+        description: "Jumlah config"
+        required: true
+        default: "3"
+        type: string
+
+      start_ip:
+        description: "IP awal client"
+        required: true
+        default: "10.66.66.61"
         type: string
 
 jobs:
-  ubuntu:
+  generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
 
     steps:
-      - name: Setup SSH + Tailscale
-        env:
-          TS_AUTHKEY: ${{ inputs.tailscale_auth_key }}
-          SSH_PUBKEY: ${{ inputs.ssh_public_key }}
-
+      - name: Install AWG/WireGuard tools
         run: |
-          echo "::add-mask::$TS_AUTHKEY"
-
-          echo "=== Install SSH ==="
           sudo apt-get update
-          sudo apt-get install -y openssh-server curl
+          sudo apt-get install -y wireguard-tools zip
 
-          sudo systemctl enable ssh
-          sudo systemctl start ssh
-
-          echo "=== Setup SSH Key ==="
-          mkdir -p "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
-
-          printf '%s\n' "$SSH_PUBKEY" >> "$HOME/.ssh/authorized_keys"
-
-          chmod 600 "$HOME/.ssh/authorized_keys"
-
-          echo "=== Install Tailscale ==="
-          curl -fsSL https://tailscale.com/install.sh | sh
-
-          echo "=== Connect Tailscale ==="
-          sudo tailscale up \
-            --authkey="$TS_AUTHKEY" \
-            --hostname="github-runner-${GITHUB_RUN_ID}"
-
-          sleep 3
-
-          IP=$(tailscale ip -4)
-          USERNAME=$(whoami)
-
-          echo ""
-          echo "================================"
-          echo "   SSH CONNECTION INFORMATION"
-          echo "================================"
-          echo "User : $USERNAME"
-          echo "IP   : $IP"
-          echo "Port : 22"
-          echo ""
-          echo "Termux:"
-          echo "ssh -i ~/.ssh/gha_ed25519 $USERNAME@$IP"
-          echo "================================"
-
-      - name: Keep Runner Alive
+      - name: Generate configs
+        env:
+          ENDPOINT: ${{ inputs.endpoint }}
+          SERVER_PUBKEY: ${{ inputs.server_public_key }}
+          PSK: ${{ inputs.preshared_key }}
+          COUNT: ${{ inputs.client_count }}
+          START_IP: ${{ inputs.start_ip }}
         run: |
-          echo "Runner aktif."
-          echo "Jangan stop workflow kalau masih mau SSH."
-          sleep 21000
+          set -e
+
+          mkdir -p awg_configs
+
+          echo "::add-mask::$SERVER_PUBKEY"
+          echo "::add-mask::$PSK"
+
+          IFS=. read -r A B C D <<< "$START_IP"
+
+          for ((i=0; i<COUNT; i++)); do
+            IP="$A.$B.$C.$((D+i))"
+
+            PRIVATE_KEY=$(wg genkey)
+            PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
+
+            NAME="CLIENT_$((i+1))"
+
+            cat > "awg_configs/${NAME}.conf" <<EOF
+          [Interface]
+          PrivateKey = $PRIVATE_KEY
+          Address = ${IP}/24
+          DNS = 1.1.1.1,8.8.8.8
+
+          Jc = 4
+          Jmin = 40
+          Jmax = 70
+          S1 = 50
+          S2 = 100
+          H1 = 2112615044
+          H2 = 3641400900
+          H3 = 4133943628
+          H4 = 3466609064
+
+          [Peer]
+          PublicKey = $SERVER_PUBKEY
+          PresharedKey = $PSK
+          Endpoint = $ENDPOINT
+          AllowedIPs = 0.0.0.0/0, ::/0
+          PersistentKeepalive = 25
+          EOF
+
+            echo "=== $NAME ==="
+            echo "Address : $IP"
+            echo "PublicKey : $PUBLIC_KEY"
+            echo
+          done
+
+          zip -r AWG_CONFIGS.zip awg_configs
+
+      - name: Upload configs
+        uses: actions/upload-artifact@v4
+        with:
+          name: AWG_CONFIGS
+          path: AWG_CONFIGS.zip
