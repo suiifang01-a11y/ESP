@@ -1,29 +1,7 @@
-name: Ubuntu AWG SSH
+name: Tailscale + AmneziaWG Server
 
 on:
   workflow_dispatch:
-    inputs:
-      awg_private_key:
-        description: "PrivateKey client AWG untuk runner"
-        required: true
-        type: string
-      awg_server_public_key:
-        description: "PublicKey server AWG"
-        required: true
-        type: string
-      awg_preshared_key:
-        description: "PresharedKey"
-        required: true
-        type: string
-      awg_address:
-        description: "Address runner"
-        required: true
-        default: "10.66.66.61/24"
-        type: string
-      ssh_public_key:
-        description: "SSH Public Key Termux"
-        required: true
-        type: string
 
 jobs:
   runner:
@@ -31,39 +9,92 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Install SSH + WireGuard tools
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y openssh-server wireguard-tools curl
+          sudo apt-get install -y \
+            curl \
+            openssh-server \
+            wireguard-tools \
+            iproute2 \
+            iptables \
+            zip
 
+      - name: Setup SSH
+        run: |
           sudo systemctl enable ssh
           sudo systemctl start ssh
 
-      - name: Setup SSH key
-        env:
-          SSH_PUBKEY: ${{ inputs.ssh_public_key }}
+      - name: Install Tailscale
         run: |
-          mkdir -p "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up \
+            --authkey="${{ secrets.TS_AUTHKEY }}" \
+            --hostname="awg-runner-${GITHUB_RUN_ID}"
 
-          printf '%s\n' "$SSH_PUBKEY" \
-            > "$HOME/.ssh/authorized_keys"
-
-          chmod 600 "$HOME/.ssh/authorized_keys"
-
-      - name: Setup AWG config
-        env:
-          PRIVATE_KEY: ${{ inputs.awg_private_key }}
-          SERVER_PUBLIC_KEY: ${{ inputs.awg_server_public_key }}
-          PSK: ${{ inputs.awg_preshared_key }}
-          ADDRESS: ${{ inputs.awg_address }}
+      - name: Install AmneziaWG
         run: |
-          sudo mkdir -p /etc/wireguard
+          set -e
 
-          sudo tee /etc/wireguard/awg0.conf > /dev/null <<EOF
+          git clone --depth 1 \
+            https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git \
+            /tmp/amneziawg
+
+          cd /tmp/amneziawg
+
+          sudo apt-get install -y \
+            linux-headers-$(uname -r) \
+            build-essential \
+            dkms
+
+          sudo make dkms-install || true
+
+          sudo modprobe amneziawg || true
+
+      - name: Generate AWG server
+        run: |
+          set -e
+
+          sudo mkdir -p /etc/amneziawg
+
+          SERVER_PRIVATE=$(wg genkey)
+          SERVER_PUBLIC=$(printf '%s' "$SERVER_PRIVATE" | wg pubkey)
+
+          CLIENT_PRIVATE=$(wg genkey)
+          CLIENT_PUBLIC=$(printf '%s' "$CLIENT_PRIVATE" | wg pubkey)
+
+          PSK=$(wg genpsk)
+
+          sudo tee /etc/amneziawg/awg0.conf > /dev/null <<EOF
           [Interface]
-          PrivateKey = $PRIVATE_KEY
-          Address = $ADDRESS
+          PrivateKey = $SERVER_PRIVATE
+          Address = 10.66.66.1/24
+          ListenPort = 16978
+
+          Jc = 4
+          Jmin = 40
+          Jmax = 70
+          S1 = 50
+          S2 = 100
+          H1 = 2112615044
+          H2 = 3641400900
+          H3 = 4133943628
+          H4 = 3466609064
+
+          [Peer]
+          PublicKey = $CLIENT_PUBLIC
+          PresharedKey = $PSK
+          AllowedIPs = 10.66.66.2/32
+          EOF
+
+          sudo chmod 600 /etc/amneziawg/awg0.conf
+
+          mkdir -p "$HOME/AWG"
+
+          cat > "$HOME/AWG/client.conf" <<EOF
+          [Interface]
+          PrivateKey = $CLIENT_PRIVATE
+          Address = 10.66.66.2/24
           DNS = 1.1.1.1,8.8.8.8
 
           Jc = 4
@@ -77,29 +108,46 @@ jobs:
           H4 = 3466609064
 
           [Peer]
-          PublicKey = $SERVER_PUBLIC_KEY
+          PublicKey = $SERVER_PUBLIC
           PresharedKey = $PSK
           Endpoint = 103.235.72.131:16978
           AllowedIPs = 0.0.0.0/0, ::/0
           PersistentKeepalive = 25
           EOF
 
-          sudo chmod 600 /etc/wireguard/awg0.conf
+          echo "AWG server config dibuat."
+          echo "Client config dibuat: AWG/client.conf"
 
-      - name: Start AWG interface
+      - name: Start AWG
         run: |
-          sudo wg-quick up awg0 || true
-          sleep 3
+          sudo ip link add awg0 type amneziawg || true
+          sudo wg setconf awg0 /etc/amneziawg/awg0.conf || true
+          sudo ip addr add 10.66.66.1/24 dev awg0 || true
+          sudo ip link set awg0 up || true
 
-          echo "===== AWG ====="
+          echo "===== AWG STATUS ====="
           sudo wg show awg0 || true
 
-          echo "===== SSH ====="
-          echo "User: $(whoami)"
-          echo "AWG:"
-          ip -4 addr show awg0 || true
+      - name: Package client config
+        run: |
+          cd "$HOME"
+          zip -r AWG_CLIENT.zip AWG
+
+      - name: Upload AWG config
+        uses: actions/upload-artifact@v4
+        with:
+          name: AWG_CLIENT
+          path: /home/runner/AWG_CLIENT.zip
+          retention-days: 1
 
       - name: Keep runner alive
         run: |
-          echo "Runner aktif selama job berjalan."
+          echo "================================"
+          echo "RUNNER + TAILSCALE + AWG AKTIF"
+          echo "================================"
+          echo "Job akan hidup sekitar 6 jam."
+          echo "Tailscale tetap berjalan."
+          echo "AWG tetap berjalan."
+          echo
+
           sleep 21000
