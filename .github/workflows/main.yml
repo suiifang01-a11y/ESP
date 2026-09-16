@@ -33,6 +33,10 @@ jobs:
             echo 'Ubuntu:1234' | sudo chpasswd
             sudo sed -i 's/.*:\/bin\/sh/&\/bin\/bash/' /etc/passwd
 
+            # Install Chrome Remote Desktop dependencies
+            sudo apt update -y
+            sudo apt install -y python3-psutil xbase-clients xserver-xorg-video-dummy
+
             # Install Chrome Remote Desktop
             wget https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
             sudo dpkg --install chrome-remote-desktop_current_amd64.deb
@@ -77,6 +81,30 @@ jobs:
       run: |
            echo "${{ github.event.inputs.auth }}" > setup.sh
            chmod 777 setup.sh
+
+    - name: Initialize GRDP with PIN
+      run: |
+           expect -c '
+           spawn ./setup.sh
+           expect "Enter a PIN of at least six digits: "
+           send "123456\r"
+           expect "Enter the same PIN again: "
+           send "123456\r"
+           expect eof
+           '
+
+    - name: SSH tunnel over ngrok
+      uses: joshlarsen/ssh-tunnel-action@v1.2
+      with:
+        # You might need to set your ngrok authtoken as a GitHub secret
+        # For example, set a secret named NGROK_AUTHTOKEN in your repository settings
+        # and reference it here:
+        # ngrok_authtoken: ${{ secrets.NGROK_AUTHTOKEN }}
+        # If you don't provide an authtoken, ngrok will use anonymous mode (limited)
+        # ngrok_authtoken: "" # Uncomment and set your token if you have one
+        remote_port: 22 # Assuming SSH is on port 22 on the runner
+        # You can specify a subdomain for your ngrok tunnel if you have a paid ngrok account
+        # subdomain: "my-custom-subdomain"
 
     - name: Initialize GRDP with PIN
       run: |
