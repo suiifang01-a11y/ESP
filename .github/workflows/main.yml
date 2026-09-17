@@ -73,8 +73,10 @@ jobs:
       RDP_USER: Bullettemporary
       RDP_PASS: Bullet@12345
       DEBIAN_FRONTEND: noninteractive
-      # base64 dari polkit .pkla content (tidak berubah)
-      PKLA_B64: W0FsbG93IFJEUCBjb2xvcmRdCklkZW50aXR5PXVuaXgtZ3JvdXA6c3VkbwpBY3Rpb249b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIuY3JlYXRlLWRldmljZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5jcmVhdGUtcHJvZmlsZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5kZWxldGUtZGV2aWNlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLmRlbGV0ZS1wcm9maWxlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLm1vZGlmeS1kZXZpY2U7b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIubW9kaWZ5LXByb2ZpbGUKUmVzdWx0QW55PW5vClJlc3VsdEluYWN0aXZlPW5vClJlc3VsdEFjdGl2ZT15ZXMK
+      # startwm.sh: #!/bin/sh + DESKTOP_SESSION=xfce + unset DBUS + exec dbus-launch --exit-with-session startxfce4
+      STARTWM_B64: IyEvYmluL3NoCmV4cG9ydCBERVNLVE9QX1NFU1NJT049eGZjZQpleHBvcnQgWERHX1NFU1NJT05fREVTS1RPUD14ZmNlCnVuc2V0IERCVVNfU0VTU0lPTl9CVVNfQUREUkVTUwp1bnNldCBYREdfUlVOVElNRV9ESVIKZXhlYyBkYnVzLWxhdW5jaCAtLWV4aXQtd2l0aC1zZXNzaW9uIHN0YXJ0eGZjZTQK
+      # .xsession user: xfce4-session
+      XSESSION_B64: eGZjZTQtc2Vzc2lvbgo=
 
     steps:
       - name: Set hostname + runtime
@@ -93,15 +95,17 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -y
+          # xorgxrdp WAJIB: tanpa ini xrdp fallback ke Xvnc yang bermasalah
           sudo apt-get install -y \
             xrdp \
+            xorgxrdp \
             xfce4 \
             xfce4-terminal \
             xfce4-session \
             xfce4-goodies \
-            xfce4-settings \
             xfconf \
             dbus-x11 \
+            x11-xserver-utils \
             ufw \
             curl \
             wget \
@@ -109,35 +113,19 @@ jobs:
 
       - name: Configure xrdp + xfce4
         run: |
-          # FIX 1: tulis startwm.sh via printf — hindari heredoc YAML indent issue
-          # FIX 2: XDG_RUNTIME_DIR di-set, bukan di-unset
-          # FIX 3: XDG_CONFIG_DIRS sekarang include /etc sebagai entry tersendiri
-          # FIX 4: dbus-launch --exit-with-session supaya xfconfd bisa register di session bus
-          printf '%s\n' \
-            '#!/bin/sh' \
-            'unset DBUS_SESSION_BUS_ADDRESS' \
-            'export XDG_RUNTIME_DIR=/tmp/runtime-$(id -u)' \
-            'mkdir -p "$XDG_RUNTIME_DIR"' \
-            'chmod 700 "$XDG_RUNTIME_DIR"' \
-            'export XDG_CONFIG_DIRS=/etc/xdg:/etc' \
-            'export XDG_DATA_DIRS=/usr/local/share:/usr/share' \
-            'export XDG_CURRENT_DESKTOP=XFCE' \
-            'export XDG_SESSION_DESKTOP=xfce' \
-            'export XDG_SESSION_TYPE=x11' \
-            'exec dbus-launch --exit-with-session startxfce4' \
-          | sudo tee /etc/xrdp/startwm.sh > /dev/null
+          # startwm.sh: decode base64 -> tulis langsung, zero indentation issue
+          echo "$STARTWM_B64" | base64 -d | sudo tee /etc/xrdp/startwm.sh > /dev/null
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          echo "--- startwm.sh content (verify no leading spaces) ---"
-          cat -A /etc/xrdp/startwm.sh
-          echo "------------------------------------------------------"
+          echo "=== startwm.sh content ==="
+          cat /etc/xrdp/startwm.sh
+          echo "=========================="
 
-          # Allowed users
+          # Allowed users: anybody
           echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config > /dev/null
 
-          # Polkit fix
-          sudo mkdir -p /etc/polkit-1/localauthority/50-local.d/
-          echo "$PKLA_B64" | base64 -d | sudo tee /etc/polkit-1/localauthority/50-local.d/xrdp-allow.pkla > /dev/null
+          # home dir runner harus 755 agar xrdp bisa baca .xsession
+          chmod 755 "$HOME"
 
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
@@ -156,23 +144,17 @@ jobs:
           echo "$U:$P" | sudo chpasswd
           sudo usermod -aG sudo,xrdp "$U"
 
-          # .xsession: sama persis dengan startwm.sh yang sudah diperbaiki
-          printf '%s\n' \
-            '#!/bin/sh' \
-            'unset DBUS_SESSION_BUS_ADDRESS' \
-            'export XDG_RUNTIME_DIR=/tmp/runtime-$(id -u)' \
-            'mkdir -p "$XDG_RUNTIME_DIR"' \
-            'chmod 700 "$XDG_RUNTIME_DIR"' \
-            'export XDG_CONFIG_DIRS=/etc/xdg:/etc' \
-            'export XDG_DATA_DIRS=/usr/local/share:/usr/share' \
-            'export XDG_CURRENT_DESKTOP=XFCE' \
-            'export XDG_SESSION_DESKTOP=xfce' \
-            'export XDG_SESSION_TYPE=x11' \
-            'exec dbus-launch --exit-with-session startxfce4' \
-          | sudo tee /home/$U/.xsession > /dev/null
+          # home dir user harus 755
+          sudo chmod 755 /home/$U
+
+          # .xsession: isi "xfce4-session" saja — proven working pattern
+          echo "$XSESSION_B64" | base64 -d | sudo tee /home/$U/.xsession > /dev/null
           sudo chmod +x /home/$U/.xsession
           sudo chown $U:$U /home/$U/.xsession
 
+          echo "=== .xsession content ==="
+          cat /home/$U/.xsession
+          echo "========================="
           echo "RDP user: $U | pass: $P"
 
       - name: Open RDP port
@@ -192,7 +174,7 @@ jobs:
           python3 << PYEOF
           import json, urllib.request
           auth = "$AUTH"
-          data = json.loads("""$DEVICES""")
+          data = json.loads(r"""$DEVICES""")
           for d in data.get("devices", []):
               if d.get("hostname", "").startswith("bullet"):
                   req = urllib.request.Request(
