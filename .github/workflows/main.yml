@@ -1,153 +1,267 @@
-name: Tailscale + AmneziaWG Server
+name: RDP + Tailscale (Ubuntu)
 
 on:
   workflow_dispatch:
+    inputs:
+      ts_authkey:
+        description: "Tailscale Auth key (tskey-auth-...)"
+        required: true
+      ts_api_key:
+        description: "Tailscale API key (untuk purge device lama)"
+        required: true
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+      do_purge:
+        description: "Purge device bullet* lama di Tailscale sebelum mulai"
+        required: false
+        default: "true"
+      quick_test:
+        description: "Mode test 5 menit"
+        type: boolean
+        default: false
+      runtime_minutes:
+        description: "Durasi session (maks 355)"
+        required: false
+        default: "355"
+      rdp_count:
+        description: "Jumlah instance RDP (1-10)"
+        required: false
+        default: "1"
+      cycles:
+        description: "0=stop setelah run ini; N=jumlah handoff tersisa"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+  actions: write
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  runner:
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      multi:  ${{ steps.mk.outputs.multi }}
+    steps:
+      - id: mk
+        run: |
+          N=${{ inputs.rdp_count }}
+          [[ "$N" -lt 1 ]] 2>/dev/null && N=1
+          [[ "$N" -gt 10 ]] 2>/dev/null && N=10
+          INCLUDE="["
+          for i in $(seq 1 $N); do
+            [[ $i -gt 1 ]] && INCLUDE="${INCLUDE},"
+            INCLUDE="${INCLUDE}{\"id\":$i}"
+          done
+          INCLUDE="${INCLUDE}]"
+          echo "matrix={\"include\":${INCLUDE}}" >> "$GITHUB_OUTPUT"
+          [[ "$N" -gt 1 ]] && echo "multi=1" >> "$GITHUB_OUTPUT" || echo "multi=0" >> "$GITHUB_OUTPUT"
+
+  rdp:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      max-parallel: 10
+    timeout-minutes: 370
+    env:
+      RDP_USER: Bullettemporary
+      RDP_PASS: Bullet@12345
+      DEBIAN_FRONTEND: noninteractive
+      # base64 dari polkit .pkla content (tidak berubah)
+      PKLA_B64: W0FsbG93IFJEUCBjb2xvcmRdCklkZW50aXR5PXVuaXgtZ3JvdXA6c3VkbwpBY3Rpb249b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIuY3JlYXRlLWRldmljZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5jcmVhdGUtcHJvZmlsZTtvcmcuZnJlZWRlc2t0b3AuY29sb3ItbWFuYWdlci5kZWxldGUtZGV2aWNlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLmRlbGV0ZS1wcm9maWxlO29yZy5mcmVlZGVza3RvcC5jb2xvci1tYW5hZ2VyLm1vZGlmeS1kZXZpY2U7b3JnLmZyZWVkZXNrdG9wLmNvbG9yLW1hbmFnZXIubW9kaWZ5LXByb2ZpbGUKUmVzdWx0QW55PW5vClJlc3VsdEluYWN0aXZlPW5vClJlc3VsdEFjdGl2ZT15ZXMK
 
     steps:
+      - name: Set hostname + runtime
+        run: |
+          N="${{ inputs.rdp_count }}"
+          [[ "$N" -gt 1 ]] 2>/dev/null && HN="bullet${{ matrix.id }}" || HN="bullet"
+          echo "TS_HOSTNAME=$HN" >> "$GITHUB_ENV"
+          RT="${{ inputs.runtime_minutes }}"
+          [[ "${{ inputs.quick_test }}" == "true" ]] && RT=5
+          [[ ! "$RT" =~ ^[0-9]+$ ]] && RT=355
+          [[ "$RT" -lt 6 ]]         && RT=355
+          [[ "$RT" -gt 355 ]]       && RT=355
+          echo "RUNTIME_MINUTES=$RT" >> "$GITHUB_ENV"
+          echo "Hostname: $HN | Runtime: $RT min"
+
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y \
+            xrdp \
+            xfce4 \
+            xfce4-terminal \
+            xfce4-session \
+            xfce4-goodies \
+            xfce4-settings \
+            xfconf \
+            dbus-x11 \
+            ufw \
             curl \
-            openssh-server \
-            wireguard-tools \
-            iproute2 \
-            iptables \
-            zip
+            wget \
+            python3
 
-      - name: Setup SSH
+      - name: Configure xrdp + xfce4
         run: |
-          sudo systemctl enable ssh
-          sudo systemctl start ssh
+          # FIX 1: tulis startwm.sh via printf — hindari heredoc YAML indent issue
+          # FIX 2: XDG_RUNTIME_DIR di-set, bukan di-unset
+          # FIX 3: XDG_CONFIG_DIRS sekarang include /etc sebagai entry tersendiri
+          # FIX 4: dbus-launch --exit-with-session supaya xfconfd bisa register di session bus
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'unset DBUS_SESSION_BUS_ADDRESS' \
+            'export XDG_RUNTIME_DIR=/tmp/runtime-$(id -u)' \
+            'mkdir -p "$XDG_RUNTIME_DIR"' \
+            'chmod 700 "$XDG_RUNTIME_DIR"' \
+            'export XDG_CONFIG_DIRS=/etc/xdg:/etc' \
+            'export XDG_DATA_DIRS=/usr/local/share:/usr/share' \
+            'export XDG_CURRENT_DESKTOP=XFCE' \
+            'export XDG_SESSION_DESKTOP=xfce' \
+            'export XDG_SESSION_TYPE=x11' \
+            'exec dbus-launch --exit-with-session startxfce4' \
+          | sudo tee /etc/xrdp/startwm.sh > /dev/null
+          sudo chmod +x /etc/xrdp/startwm.sh
 
-      - name: Install Tailscale
+          echo "--- startwm.sh content (verify no leading spaces) ---"
+          cat -A /etc/xrdp/startwm.sh
+          echo "------------------------------------------------------"
+
+          # Allowed users
+          echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config > /dev/null
+
+          # Polkit fix
+          sudo mkdir -p /etc/polkit-1/localauthority/50-local.d/
+          echo "$PKLA_B64" | base64 -d | sudo tee /etc/polkit-1/localauthority/50-local.d/xrdp-allow.pkla > /dev/null
+
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          sleep 3
+          sudo systemctl is-active xrdp \
+            && echo "xrdp: running OK" \
+            || { echo "ERROR: xrdp failed"; sudo journalctl -u xrdp --no-pager -n 30; exit 1; }
+
+      - name: Create RDP user
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+          U="$RDP_USER"
+          P="$RDP_PASS"
+          if ! id "$U" &>/dev/null; then
+            sudo useradd -m -s /bin/bash "$U"
+          fi
+          echo "$U:$P" | sudo chpasswd
+          sudo usermod -aG sudo,xrdp "$U"
+
+          # .xsession: sama persis dengan startwm.sh yang sudah diperbaiki
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'unset DBUS_SESSION_BUS_ADDRESS' \
+            'export XDG_RUNTIME_DIR=/tmp/runtime-$(id -u)' \
+            'mkdir -p "$XDG_RUNTIME_DIR"' \
+            'chmod 700 "$XDG_RUNTIME_DIR"' \
+            'export XDG_CONFIG_DIRS=/etc/xdg:/etc' \
+            'export XDG_DATA_DIRS=/usr/local/share:/usr/share' \
+            'export XDG_CURRENT_DESKTOP=XFCE' \
+            'export XDG_SESSION_DESKTOP=xfce' \
+            'export XDG_SESSION_TYPE=x11' \
+            'exec dbus-launch --exit-with-session startxfce4' \
+          | sudo tee /home/$U/.xsession > /dev/null
+          sudo chmod +x /home/$U/.xsession
+          sudo chown $U:$U /home/$U/.xsession
+
+          echo "RDP user: $U | pass: $P"
+
+      - name: Open RDP port
+        run: |
+          sudo ufw allow 3389/tcp || true
+          echo "Port 3389 opened."
+
+      - name: Purge old Tailscale devices
+        if: ${{ needs.setup.outputs.multi == '0' && inputs.do_purge == 'true' }}
+        run: |
+          AUTH=$(echo -n "${{ inputs.ts_api_key }}:" | base64 -w0)
+          TN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${{ inputs.ts_tailnet }}")
+          DEVICES=$(curl -sf -H "Authorization: Basic $AUTH" \
+            "https://api.tailscale.com/api/v2/tailnet/$TN/devices") || {
+            echo "Warning: gagal fetch devices. Skip purge."; exit 0
+          }
+          python3 << PYEOF
+          import json, urllib.request
+          auth = "$AUTH"
+          data = json.loads("""$DEVICES""")
+          for d in data.get("devices", []):
+              if d.get("hostname", "").startswith("bullet"):
+                  req = urllib.request.Request(
+                      f"https://api.tailscale.com/api/v2/device/{d['id']}",
+                      method="DELETE",
+                      headers={"Authorization": f"Basic {auth}"}
+                  )
+                  try:
+                      urllib.request.urlopen(req)
+                      print(f"Deleted: {d['hostname']}")
+                  except Exception as e:
+                      print(f"Warn: {e}")
+          PYEOF
+          echo "Purge selesai."
+
+      - name: Install + connect Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo tailscale logout 2>/dev/null || true
           sudo tailscale up \
-            --authkey="${{ secrets.TS_AUTHKEY }}" \
-            --hostname="awg-runner-${GITHUB_RUN_ID}"
+            --authkey="${{ inputs.ts_authkey }}" \
+            --hostname="$TS_HOSTNAME" \
+            --accept-dns=true \
+            --accept-routes=true \
+            --ssh
+          IP4=$(sudo tailscale ip -4 2>/dev/null | head -1)
+          echo "TAILSCALE_IP=$IP4" >> "$GITHUB_ENV"
+          echo "══════════════════════════════════════"
+          echo "  RDP  : $IP4:3389"
+          echo "  USER : $RDP_USER"
+          echo "  PASS : $RDP_PASS"
+          echo "══════════════════════════════════════"
 
-      - name: Install AmneziaWG
+      - name: Keep alive
         run: |
-          set -e
+          END=$((SECONDS + RUNTIME_MINUTES * 60))
+          while [ $SECONDS -lt $END ]; do
+            REMAIN=$(( (END - SECONDS) / 60 ))
+            echo "[RDP] $(date +%H:%M:%S) | sisa: ${REMAIN} menit | ${TAILSCALE_IP}:3389"
+            sleep 60
+          done
 
-          git clone --depth 1 \
-            https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git \
-            /tmp/amneziawg
-
-          cd /tmp/amneziawg
-
-          sudo apt-get install -y \
-            linux-headers-$(uname -r) \
-            build-essential \
-            dkms
-
-          sudo make dkms-install || true
-
-          sudo modprobe amneziawg || true
-
-      - name: Generate AWG server
+      - name: Dispatch next or stop
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
-
-          sudo mkdir -p /etc/amneziawg
-
-          SERVER_PRIVATE=$(wg genkey)
-          SERVER_PUBLIC=$(printf '%s' "$SERVER_PRIVATE" | wg pubkey)
-
-          CLIENT_PRIVATE=$(wg genkey)
-          CLIENT_PUBLIC=$(printf '%s' "$CLIENT_PRIVATE" | wg pubkey)
-
-          PSK=$(wg genpsk)
-
-          sudo tee /etc/amneziawg/awg0.conf > /dev/null <<EOF
-          [Interface]
-          PrivateKey = $SERVER_PRIVATE
-          Address = 10.66.66.1/24
-          ListenPort = 16978
-
-          Jc = 4
-          Jmin = 40
-          Jmax = 70
-          S1 = 50
-          S2 = 100
-          H1 = 2112615044
-          H2 = 3641400900
-          H3 = 4133943628
-          H4 = 3466609064
-
-          [Peer]
-          PublicKey = $CLIENT_PUBLIC
-          PresharedKey = $PSK
-          AllowedIPs = 10.66.66.2/32
-          EOF
-
-          sudo chmod 600 /etc/amneziawg/awg0.conf
-
-          mkdir -p "$HOME/AWG"
-
-          cat > "$HOME/AWG/client.conf" <<EOF
-          [Interface]
-          PrivateKey = $CLIENT_PRIVATE
-          Address = 10.66.66.2/24
-          DNS = 1.1.1.1,8.8.8.8
-
-          Jc = 4
-          Jmin = 40
-          Jmax = 70
-          S1 = 50
-          S2 = 100
-          H1 = 2112615044
-          H2 = 3641400900
-          H3 = 4133943628
-          H4 = 3466609064
-
-          [Peer]
-          PublicKey = $SERVER_PUBLIC
-          PresharedKey = $PSK
-          Endpoint = 103.235.72.131:16978
-          AllowedIPs = 0.0.0.0/0, ::/0
-          PersistentKeepalive = 25
-          EOF
-
-          echo "AWG server config dibuat."
-          echo "Client config dibuat: AWG/client.conf"
-
-      - name: Start AWG
-        run: |
-          sudo ip link add awg0 type amneziawg || true
-          sudo wg setconf awg0 /etc/amneziawg/awg0.conf || true
-          sudo ip addr add 10.66.66.1/24 dev awg0 || true
-          sudo ip link set awg0 up || true
-
-          echo "===== AWG STATUS ====="
-          sudo wg show awg0 || true
-
-      - name: Package client config
-        run: |
-          cd "$HOME"
-          zip -r AWG_CLIENT.zip AWG
-
-      - name: Upload AWG config
-        uses: actions/upload-artifact@v4
-        with:
-          name: AWG_CLIENT
-          path: /home/runner/AWG_CLIENT.zip
-          retention-days: 1
-
-      - name: Keep runner alive
-        run: |
-          echo "================================"
-          echo "RUNNER + TAILSCALE + AWG AKTIF"
-          echo "================================"
-          echo "Job akan hidup sekitar 6 jam."
-          echo "Tailscale tetap berjalan."
-          echo "AWG tetap berjalan."
-          echo
-
-          sleep 21000
+          CYCLES="${{ inputs.cycles }}"
+          [[ ! "$CYCLES" =~ ^[0-9]+$ ]] && CYCLES=0
+          if [[ "$CYCLES" -gt 0 ]]; then
+            NEXT=$((CYCLES - 1))
+            REPO="${{ github.repository }}"
+            REF="${{ github.ref_name }}"
+            if [[ "$NEXT" -le 0 ]]; then
+              curl -sf -X POST \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -d "{\"ref\":\"$REF\",\"inputs\":{\"ts_tailnet\":\"${{ inputs.ts_tailnet }}\",\"ts_api_key\":\"${{ inputs.ts_api_key }}\",\"base_prefix\":\"bullet\",\"max_count\":\"10\",\"dry_run\":\"false\"}}" \
+                "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-stop.yml/dispatches"
+              echo "Dispatched STOP."
+            else
+              PAYLOAD=$(python3 -c "import json; print(json.dumps({'ts_authkey':'${{ inputs.ts_authkey }}','ts_api_key':'${{ inputs.ts_api_key }}','ts_tailnet':'${{ inputs.ts_tailnet }}','do_purge':'${{ inputs.do_purge }}','quick_test':'${{ inputs.quick_test }}','runtime_minutes':'${{ inputs.runtime_minutes }}','rdp_count':'${{ inputs.rdp_count }}','cycles':str($NEXT)}))")
+              curl -sf -X POST \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -d "{\"ref\":\"$REF\",\"inputs\":$PAYLOAD}" \
+                "https://api.github.com/repos/$REPO/actions/workflows/rdp-tailscale-ubuntu-clean.yml/dispatches"
+              echo "Dispatched next, cycles=$NEXT"
+            fi
+          else
+            echo "cycles=0, session selesai."
+          fi
