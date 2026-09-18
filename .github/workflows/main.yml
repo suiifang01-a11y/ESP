@@ -43,7 +43,7 @@ defaults:
 
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.mk.outputs.matrix }}
       multi:  ${{ steps.mk.outputs.multi }}
@@ -64,7 +64,8 @@ jobs:
 
   rdp:
     needs: setup
-    runs-on: ubuntu-latest
+    # Pakai ubuntu-22.04 — lebih stabil untuk xrdp+LXDE daripada 24.04
+    runs-on: ubuntu-22.04
     strategy:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       max-parallel: 10
@@ -73,10 +74,10 @@ jobs:
       RDP_USER: Bullettemporary
       RDP_PASS: Bullet@12345
       DEBIAN_FRONTEND: noninteractive
-      # startwm.sh: #!/bin/sh + DESKTOP_SESSION=xfce + unset DBUS + exec dbus-launch --exit-with-session startxfce4
-      STARTWM_B64: IyEvYmluL3NoCmV4cG9ydCBERVNLVE9QX1NFU1NJT049eGZjZQpleHBvcnQgWERHX1NFU1NJT05fREVTS1RPUD14ZmNlCnVuc2V0IERCVVNfU0VTU0lPTl9CVVNfQUREUkVTUwp1bnNldCBYREdfUlVOVElNRV9ESVIKZXhlYyBkYnVzLWxhdW5jaCAtLWV4aXQtd2l0aC1zZXNzaW9uIHN0YXJ0eGZjZTQK
-      # .xsession user: xfce4-session
-      XSESSION_B64: eGZjZTQtc2Vzc2lvbgo=
+      # startwm.sh: unset DBUS + exec dbus-launch --exit-with-session startlxde
+      STARTWM_B64: IyEvYmluL3NoCnVuc2V0IERCVVNfU0VTU0lPTl9CVVNfQUREUkVTUwp1bnNldCBYREdfUlVOVElNRV9ESVIKZXhlYyBkYnVzLWxhdW5jaCAtLWV4aXQtd2l0aC1zZXNzaW9uIHN0YXJ0bHhkZQo=
+      # .xsession: exec startlxde
+      XSESSION_B64: IyEvYmluL3NoCmV4ZWMgc3RhcnRseGRlCg==
 
     steps:
       - name: Set hostname + runtime
@@ -95,15 +96,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -y
-          # xorgxrdp WAJIB: tanpa ini xrdp fallback ke Xvnc yang bermasalah
           sudo apt-get install -y \
             xrdp \
             xorgxrdp \
-            xfce4 \
-            xfce4-terminal \
-            xfce4-session \
-            xfce4-goodies \
-            xfconf \
+            lxde \
+            lxde-core \
+            lxsession \
+            lxterminal \
             dbus-x11 \
             x11-xserver-utils \
             ufw \
@@ -111,28 +110,28 @@ jobs:
             wget \
             python3
 
-      - name: Configure xrdp + xfce4
+      - name: Configure xrdp + LXDE
         run: |
-          # startwm.sh: decode base64 -> tulis langsung, zero indentation issue
+          # startwm.sh via base64 — zero indentation/heredoc issue
           echo "$STARTWM_B64" | base64 -d | sudo tee /etc/xrdp/startwm.sh > /dev/null
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          echo "=== startwm.sh content ==="
+          echo "=== startwm.sh ==="
           cat /etc/xrdp/startwm.sh
-          echo "=========================="
+          echo "=================="
+
+          # home dir harus 755 agar xrdp bisa baca .xsession
+          chmod 755 "$HOME"
 
           # Allowed users: anybody
           echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config > /dev/null
-
-          # home dir runner harus 755 agar xrdp bisa baca .xsession
-          chmod 755 "$HOME"
 
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
           sleep 3
           sudo systemctl is-active xrdp \
-            && echo "xrdp: running OK" \
-            || { echo "ERROR: xrdp failed"; sudo journalctl -u xrdp --no-pager -n 30; exit 1; }
+            && echo "xrdp: OK" \
+            || { echo "ERROR: xrdp gagal start"; sudo journalctl -u xrdp --no-pager -n 30; exit 1; }
 
       - name: Create RDP user
         run: |
@@ -143,24 +142,21 @@ jobs:
           fi
           echo "$U:$P" | sudo chpasswd
           sudo usermod -aG sudo,xrdp "$U"
-
-          # home dir user harus 755
           sudo chmod 755 /home/$U
 
-          # .xsession: isi "xfce4-session" saja — proven working pattern
+          # .xsession via base64
           echo "$XSESSION_B64" | base64 -d | sudo tee /home/$U/.xsession > /dev/null
           sudo chmod +x /home/$U/.xsession
           sudo chown $U:$U /home/$U/.xsession
 
-          echo "=== .xsession content ==="
+          echo "=== .xsession ==="
           cat /home/$U/.xsession
-          echo "========================="
-          echo "RDP user: $U | pass: $P"
+          echo "================="
+          echo "User: $U | Pass: $P"
 
       - name: Open RDP port
         run: |
           sudo ufw allow 3389/tcp || true
-          echo "Port 3389 opened."
 
       - name: Purge old Tailscale devices
         if: ${{ needs.setup.outputs.multi == '0' && inputs.do_purge == 'true' }}
@@ -169,7 +165,7 @@ jobs:
           TN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${{ inputs.ts_tailnet }}")
           DEVICES=$(curl -sf -H "Authorization: Basic $AUTH" \
             "https://api.tailscale.com/api/v2/tailnet/$TN/devices") || {
-            echo "Warning: gagal fetch devices. Skip purge."; exit 0
+            echo "Warning: skip purge."; exit 0
           }
           python3 << PYEOF
           import json, urllib.request
@@ -188,7 +184,6 @@ jobs:
                   except Exception as e:
                       print(f"Warn: {e}")
           PYEOF
-          echo "Purge selesai."
 
       - name: Install + connect Tailscale
         run: |
@@ -245,5 +240,5 @@ jobs:
               echo "Dispatched next, cycles=$NEXT"
             fi
           else
-            echo "cycles=0, session selesai."
+            echo "cycles=0, selesai."
           fi
